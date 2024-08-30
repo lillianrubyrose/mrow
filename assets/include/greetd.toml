@@ -1,0 +1,13 @@
+[module]
+commands = [
+    { type = "install_package", name = "greetd-tuigreet" },
+    { type = "overwrite_file", content = """
+[terminal]
+vt = 1
+
+[default_session]
+command = "tuigreet --time --asterisks --remember --cmd Hyprland"
+user = "greeter"
+""" },
+    "systemctl enable greetd",
+]

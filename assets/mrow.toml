@@ -1,0 +1,14 @@
+[config]
+includes = ["./include/greetd.toml"] # optional
+aur-helper = "paru"                  # optional, needed if you use "aur=true" in install_package
+
+[module]
+commands = [ # also optional
+    { type = "install_package", name = "hyprland" },
+    { type = "install_package", name = "foot" },
+    { type = "install_package", name = "fish" },
+    { type = "install_package", name = "eza" },
+    { type = "install_package", name = "bat" },
+    { type = "install_package", name = "btop" },
+    { type = "install_package", name = "mercury-browser-avx2-bin", aur = true },
+]
