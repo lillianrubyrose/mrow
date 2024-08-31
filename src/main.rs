@@ -14,12 +14,12 @@ enum Error {
     #[error("Imported module from '{0}' doesn't exist: '{1}'")]
     ImportNotFound(PathBuf, PathBuf),
 
-    #[error("Invalid command in '{0}'. '{1}'")]
-    InvalidCommand(PathBuf, Value),
-    #[error("Invalid command in '{0}'. {1}")]
-    InvalidCommandGeneric(PathBuf, &'static str),
-    #[error("Invalid command in '{0}'. {1}")]
-    InvalidCommandGenericOwned(PathBuf, String),
+    #[error("Invalid step in '{0}'. '{1}'")]
+    InvalidStep(PathBuf, Value),
+    #[error("Invalid step in '{0}'. {1}")]
+    InvalidStepGeneric(PathBuf, &'static str),
+    #[error("Invalid step in '{0}'. {1}")]
+    InvalidStepGenericOwned(PathBuf, String),
 
     #[error("'{0}': {1}")]
     TomlDeserError(PathBuf, toml::de::Error),
@@ -70,7 +70,7 @@ struct RawModuleTable {
     #[serde(default)]
     includes: Includes,
     #[serde(default)]
-    commands: Vec<Value>,
+    steps: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,13 +92,13 @@ struct ConfigTable {
 }
 
 #[derive(Debug, Clone)]
-struct Command {
+struct Step {
     owner: PathBuf,
-    kind: CommandKind,
+    kind: StepKind,
 }
 
 #[derive(Debug, Clone)]
-enum CommandKind {
+enum StepKind {
     InstallPackage {
         package: String,
         aur: bool,
@@ -125,14 +125,14 @@ enum CommandKind {
         command: String,
     },
     RunCommands {
-        commands: Vec<String>,
+        steps: Vec<String>,
     },
 }
 
 #[derive(Debug)]
 struct ModuleTable {
     includes: Includes,
-    commands: Vec<CommandKind>,
+    steps: Vec<StepKind>,
 }
 
 #[derive(Debug)]
@@ -180,18 +180,18 @@ impl MrowFile {
             .map(|RawConfigTable { aur_helper }| ConfigTable { aur_helper });
 
         let module: ModuleTable = {
-            let mut commands = Vec::with_capacity(raw.module.commands.len());
+            let mut steps = Vec::with_capacity(raw.module.steps.len());
 
-            for raw in raw.module.commands {
-                let command = match raw {
-                    Value::String(command) => CommandKind::RunCommand { command },
-                    Value::Array(commands) => CommandKind::RunCommands {
-                        commands: commands
+            for raw in raw.module.steps {
+                let step = match raw {
+                    Value::String(command) => StepKind::RunCommand { command },
+                    Value::Array(commands) => StepKind::RunCommands {
+                        steps: commands
                             .into_iter()
                             .map(|v| {
                                 v.as_str()
                                     .map(ToString::to_string)
-                                    .ok_or(Error::InvalidCommand(path.clone(), v))
+                                    .ok_or(Error::InvalidStep(path.clone(), v))
                             })
                             .collect::<Result<Vec<_>>>()?,
                     },
@@ -199,9 +199,9 @@ impl MrowFile {
                         let kind = table
                             .remove("kind")
                             .and_then(|v| v.as_str().map(ToString::to_string))
-                            .ok_or(Error::InvalidCommandGeneric(
+                            .ok_or(Error::InvalidStepGeneric(
                                 path.clone(),
-                                "Missing command kind.",
+                                "Missing step kind.",
                             ))?;
 
                         match kind.as_str() {
@@ -209,9 +209,9 @@ impl MrowFile {
                                 let package = table
                                     .remove("package")
                                     .and_then(|v| v.as_str().map(ToString::to_string))
-                                    .ok_or(Error::InvalidCommandGeneric(
+                                    .ok_or(Error::InvalidStepGeneric(
                                         path.clone(),
-                                        "Missing 'package' key in install-package command.",
+                                        "Missing 'package' key in install-package step.",
                                     ))?;
 
                                 let aur = table
@@ -219,7 +219,7 @@ impl MrowFile {
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or_default();
 
-                                CommandKind::InstallPackage { package, aur }
+                                StepKind::InstallPackage { package, aur }
                             }
 
                             "install-packages" => {
@@ -229,15 +229,15 @@ impl MrowFile {
                                         Value::Array(v) => Some(v),
                                         _ => None,
                                     })
-                                    .ok_or(Error::InvalidCommandGeneric(
+                                    .ok_or(Error::InvalidStepGeneric(
                                         path.clone(),
-                                        "Missing 'package' key in install-package command.",
+                                        "Missing 'package' key in install-package step.",
                                     ))?
                                     .into_iter()
                                     .map(|v| {
                                         v.as_str()
                                             .map(ToString::to_string)
-                                            .ok_or(Error::InvalidCommand(path.clone(), v))
+                                            .ok_or(Error::InvalidStep(path.clone(), v))
                                     })
                                     .collect::<Result<Vec<_>>>()?;
 
@@ -246,7 +246,7 @@ impl MrowFile {
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or_default();
 
-                                CommandKind::InstallPackages { packages, aur }
+                                StepKind::InstallPackages { packages, aur }
                             }
 
                             "write-file" => {
@@ -255,11 +255,11 @@ impl MrowFile {
                                     .map(|v| {
                                         v.as_str()
                                             .map(ToString::to_string)
-                                            .ok_or(Error::InvalidCommand(path.clone(), v))
+                                            .ok_or(Error::InvalidStep(path.clone(), v))
                                     })
-                                    .ok_or(Error::InvalidCommandGeneric(
+                                    .ok_or(Error::InvalidStepGeneric(
                                         path.clone(),
-                                        "Missing 'path' key in write-file command.",
+                                        "Missing 'path' key in write-file step.",
                                     ))??;
 
                                 let content = table
@@ -267,11 +267,11 @@ impl MrowFile {
                                     .map(|v| {
                                         v.as_str()
                                             .map(ToString::to_string)
-                                            .ok_or(Error::InvalidCommand(path.clone(), v))
+                                            .ok_or(Error::InvalidStep(path.clone(), v))
                                     })
-                                    .ok_or(Error::InvalidCommandGeneric(
+                                    .ok_or(Error::InvalidStepGeneric(
                                         path.clone(),
-                                        "Missing 'content' key in write-file command.",
+                                        "Missing 'content' key in write-file step.",
                                     ))??;
 
                                 let overwrite = table
@@ -279,7 +279,7 @@ impl MrowFile {
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or_default();
 
-                                CommandKind::WriteFile {
+                                StepKind::WriteFile {
                                     path: Self::resolve_path(&file_path, &dir),
                                     content,
                                     overwrite,
@@ -292,11 +292,11 @@ impl MrowFile {
                                     .map(|v| {
                                         v.as_str()
                                             .map(ToString::to_string)
-                                            .ok_or(Error::InvalidCommand(path.clone(), v))
+                                            .ok_or(Error::InvalidStep(path.clone(), v))
                                     })
-                                    .ok_or(Error::InvalidCommandGeneric(
+                                    .ok_or(Error::InvalidStepGeneric(
                                         path.clone(),
-                                        "Missing 'from' key in write-file command.",
+                                        "Missing 'from' key in write-file step.",
                                     ))??;
 
                                 let to_path = table
@@ -304,11 +304,11 @@ impl MrowFile {
                                     .map(|v| {
                                         v.as_str()
                                             .map(ToString::to_string)
-                                            .ok_or(Error::InvalidCommand(path.clone(), v))
+                                            .ok_or(Error::InvalidStep(path.clone(), v))
                                     })
-                                    .ok_or(Error::InvalidCommandGeneric(
+                                    .ok_or(Error::InvalidStepGeneric(
                                         path.clone(),
-                                        "Missing 'to' key in write-file command.",
+                                        "Missing 'to' key in write-file step.",
                                     ))??;
 
                                 let delete_existing = table
@@ -316,7 +316,7 @@ impl MrowFile {
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or_default();
 
-                                CommandKind::Symlink {
+                                StepKind::Symlink {
                                     from: Self::resolve_path(&from_path, &dir),
                                     to: Self::resolve_path(&to_path, &dir),
                                     delete_existing,
@@ -324,22 +324,22 @@ impl MrowFile {
                             }
 
                             _ => {
-                                return Err(Error::InvalidCommandGenericOwned(
+                                return Err(Error::InvalidStepGenericOwned(
                                     path.clone(),
-                                    format!("Invalid command kind: {kind}"),
+                                    format!("Invalid step kind: {kind}"),
                                 ))
                             }
                         }
                     }
 
-                    value => return Err(Error::InvalidCommand(path.clone(), value)),
+                    value => return Err(Error::InvalidStep(path.clone(), value)),
                 };
-                commands.push(command);
+                steps.push(step);
             }
 
             ModuleTable {
                 includes: raw.module.includes,
-                commands,
+                steps,
             }
         };
 
@@ -378,33 +378,33 @@ fn gather_includes(file: &MrowFile) -> Result<Vec<MrowFile>> {
     .collect()
 }
 
-fn get_all_commands(base: &MrowFile) -> Result<Vec<Command>> {
+fn get_all_steps(base: &MrowFile) -> Result<Vec<Step>> {
     let includes = gather_includes(base)?;
 
     includes
         .iter()
-        .filter(|include| include.module.commands.is_empty() && include.module.includes.empty())
+        .filter(|include| include.module.steps.is_empty() && include.module.includes.empty())
         .for_each(|include| {
             println!(
-                "[?] '{}' has no commands or includes.",
+                "[?] '{}' has no steps or includes.",
                 include.path.to_string_lossy()
             )
         });
 
-    let mut commands = base
+    let mut steps = base
         .module
-        .commands
+        .steps
         .iter()
         .cloned()
-        .map(|kind| Command {
+        .map(|kind| Step {
             owner: base.path.clone(),
             kind,
         })
         .collect::<Vec<_>>();
     for include in includes {
-        commands.extend(get_all_commands(&include)?);
+        steps.extend(get_all_steps(&include)?);
     }
-    Ok(commands)
+    Ok(steps)
 }
 
 fn _main() -> Result<()> {
@@ -426,8 +426,8 @@ fn _main() -> Result<()> {
     }
 
     let root = MrowFile::new(root_file)?;
-    let all_commands = get_all_commands(&root)?;
-    dbg!(all_commands);
+    let all_steps = get_all_steps(&root)?;
+    dbg!(all_steps);
 
     // println!("[*] NOTE: Adjust your sudo timestamp_timeout value to be longer than the install should take otherwise it may eventually ask for authentication again.");
     // println!("[*] NOTE: To avoid this, CTRL+C and run `sudo visudo -f $USER`. Then paste the following line:");

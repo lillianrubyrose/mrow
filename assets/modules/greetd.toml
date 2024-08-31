@@ -1,5 +1,5 @@
 [module]
-commands = [
+steps = [
     { kind = "install-package", package = "greetd-tuigreet" },
     { kind = "write-file", path = "/etc/greetd/config.toml", content = """
 [terminal]

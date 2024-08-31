@@ -1,5 +1,5 @@
 [module]
-commands = [
+steps = [
     { kind = "install-packages", packages = [
         "hyprland",
         "foot",
