@@ -527,7 +527,27 @@ fn install_packages(
         let cmd = std::process::Command::new(command)
             .arg(flags)
             .arg("--noconfirm")
+            .arg("--needed")
             .args(packages)
+            .output()?;
+        if !cmd.status.success() {
+            return Err(Error::StepFailed(
+                owner,
+                String::from_utf8_lossy(&cmd.stderr).into_owned(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn run_command(debug: bool, owner: PathBuf, command: &str) -> Result<()> {
+    let command_and_args = command.split(' ').collect::<Vec<_>>();
+    if debug {
+        println!("[D] {command_and_args:?}");
+    } else {
+        let cmd = std::process::Command::new(command_and_args[0])
+            .args(&command_and_args[1..])
             .output()?;
         if !cmd.status.success() {
             return Err(Error::StepFailed(
@@ -542,19 +562,9 @@ fn install_packages(
 
 fn run_commands(debug: bool, owner: PathBuf, commands: &[String]) -> Result<()> {
     for command in commands {
-        let command_and_args = command.split(' ').collect::<Vec<_>>();
-        if debug {
-            println!("[D] {command_and_args:?}");
-        } else {
-            let cmd = std::process::Command::new(command_and_args[0])
-                .args(&command_and_args[1..])
-                .output()?;
-            if !cmd.status.success() {
-                return Err(Error::StepFailed(
-                    owner,
-                    String::from_utf8_lossy(&cmd.stderr).into_owned(),
-                ));
-            }
+        let chained_commands = command.split("&&");
+        for command in chained_commands {
+            run_command(debug, owner.clone(), command.trim())?;
         }
     }
 
@@ -598,6 +608,30 @@ fn _main() -> Result<()> {
             println!("{}", String::from_utf8_lossy(sudo_out.stderr.as_slice()));
             exit(-1);
         }
+    }
+
+    if let Some(aur_helper) = aur_helper {
+        let name = match aur_helper {
+            AurHelper::Yay => "yay",
+            AurHelper::Paru => "paru-bin",
+        };
+
+        install_packages(
+            args.debug,
+            root.path.clone(),
+            &["base-devel".into(), "git".into()],
+            None,
+        )?;
+
+        run_commands(
+            args.debug,
+            root.path,
+            &[
+                format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
+                format!("sudo chown -R $USER: /opt/{name}"),
+                format!("cd /opt/{name} && makepkg -si --noconfirm"),
+            ],
+        )?;
     }
 
     for step in all_steps {

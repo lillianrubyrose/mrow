@@ -1,9 +1,0 @@
-[module]
-steps = [
-    { kind = "write-file", path = "/etc/pipewire/pipewire.conf.d/10-sample-rate.conf", content = """
-context.properties = {
-    default.clock.rate = 192000
-    default.clock.allowed-rates = [ 44100 48000 88200 96000 192000 ]
-}
-""", as-root = true },
-]

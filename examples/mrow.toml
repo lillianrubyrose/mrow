@@ -1,0 +1,4 @@
+[config]
+aur-helper = "paru"
+
+[module]

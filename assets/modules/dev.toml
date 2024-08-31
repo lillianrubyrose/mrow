@@ -1,8 +1,0 @@
-[module]
-includes = ["dev/rust.toml"]
-
-steps = [
-    { kind = "install-packages", packages = [
-        "zed-preview-bin",
-    ], aur = true },
-]
