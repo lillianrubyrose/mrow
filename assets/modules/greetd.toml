@@ -8,6 +8,6 @@ vt = 1
 [default_session]
 command = "tuigreet --time --asterisks --remember --cmd Hyprland"
 user = "greeter"
-""", overwrite = true },
+""", overwrite = true, as-root = true },
     "systemctl enable greetd",
 ]

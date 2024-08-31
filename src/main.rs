@@ -5,12 +5,17 @@ use std::{
 
 use clap::Parser;
 use miette::IntoDiagnostic;
+use rand::{distributions::Alphanumeric, prelude::Distribution, rngs::OsRng};
+use regex::Regex;
 use serde::Deserialize;
 use thiserror::Error;
 use toml::Value;
 
 #[derive(Debug, Error)]
 enum Error {
+    #[error("This tool is made to work with Arch Linux and may work with some derivatives")]
+    NotArch,
+
     #[error("Imported module from '{0}' doesn't exist: '{1}'")]
     ImportNotFound(PathBuf, PathBuf),
 
@@ -20,6 +25,9 @@ enum Error {
     InvalidStepGeneric(PathBuf, &'static str),
     #[error("Invalid step in '{0}'. {1}")]
     InvalidStepGenericOwned(PathBuf, String),
+
+    #[error("Step in '{0}' failed. {1}")]
+    StepFailed(PathBuf, String),
 
     #[error("'{0}': {1}")]
     TomlDeserError(PathBuf, toml::de::Error),
@@ -53,14 +61,15 @@ impl Includes {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
 enum AurHelper {
     Yay,
     Paru,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 struct RawConfigTable {
     aur_helper: Option<AurHelper>,
 }
@@ -111,10 +120,12 @@ enum StepKind {
         path: PathBuf,
         content: String,
         overwrite: bool,
+        as_root: bool,
     },
     CopyFile {
-        from_path: String,
-        to_path: String,
+        from: PathBuf,
+        to: PathBuf,
+        as_root: bool,
     },
     Symlink {
         from: PathBuf,
@@ -125,7 +136,7 @@ enum StepKind {
         command: String,
     },
     RunCommands {
-        steps: Vec<String>,
+        commands: Vec<String>,
     },
 }
 
@@ -186,7 +197,7 @@ impl MrowFile {
                 let step = match raw {
                     Value::String(command) => StepKind::RunCommand { command },
                     Value::Array(commands) => StepKind::RunCommands {
-                        steps: commands
+                        commands: commands
                             .into_iter()
                             .map(|v| {
                                 v.as_str()
@@ -279,10 +290,53 @@ impl MrowFile {
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or_default();
 
+                                let as_root = table
+                                    .remove("as-root")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or_default();
+
                                 StepKind::WriteFile {
                                     path: Self::resolve_path(&file_path, &dir),
                                     content,
                                     overwrite,
+                                    as_root,
+                                }
+                            }
+
+                            "copy-file" => {
+                                let from_path = table
+                                    .remove("from")
+                                    .map(|v| {
+                                        v.as_str()
+                                            .map(ToString::to_string)
+                                            .ok_or(Error::InvalidStep(path.clone(), v))
+                                    })
+                                    .ok_or(Error::InvalidStepGeneric(
+                                        path.clone(),
+                                        "Missing 'from' key in copy-file step.",
+                                    ))??;
+
+                                let to_path = table
+                                    .remove("to")
+                                    .map(|v| {
+                                        v.as_str()
+                                            .map(ToString::to_string)
+                                            .ok_or(Error::InvalidStep(path.clone(), v))
+                                    })
+                                    .ok_or(Error::InvalidStepGeneric(
+                                        path.clone(),
+                                        "Missing 'to' key in copy-file step.",
+                                    ))??;
+
+                                let as_root = table
+                                    .remove("as-root")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or_default();
+
+                                StepKind::CopyFile {
+                                    from: Self::resolve_path(&from_path, &dir),
+                                    to: Self::resolve_path(&to_path, &dir),
+                                    as_root,
                                 }
                             }
 
@@ -358,6 +412,10 @@ struct Args {
     /// The directory where your 'mrow.toml' resides. Defaults to CWD
     #[arg(short, long)]
     dir: Option<String>,
+
+    /// Doesn't execute any commands, just logs them and what they would do.
+    #[arg(long)]
+    debug: bool,
 }
 
 fn gather_includes(file: &MrowFile) -> Result<Vec<MrowFile>> {
@@ -407,7 +465,50 @@ fn get_all_steps(base: &MrowFile) -> Result<Vec<Step>> {
     Ok(steps)
 }
 
+fn check_os_release() -> Result<()> {
+    let regex = Regex::new(r#"(\w+)="?([^"|^\n]+)"#)
+        .unwrap_or_else(|_| unreachable!("should never happen"));
+
+    let mut is_arch = false;
+    for line in std::fs::read_to_string("/etc/os-release")?.lines() {
+        let captures = regex
+            .captures(line)
+            .expect("Failed to parse os-release file");
+        let key = captures
+            .get(1)
+            .expect("non-standard os-release file???")
+            .as_str();
+        let value = captures
+            .get(2)
+            .expect("non-standard os-release file???")
+            .as_str();
+
+        if key == "ID" || key == "ID_LIKE" {
+            if value.to_lowercase() == "arch" {
+                is_arch = true;
+                break;
+            }
+        }
+    }
+
+    if !is_arch {
+        return Err(Error::NotArch);
+    }
+
+    Ok(())
+}
+
+fn rand_str(length: usize) -> String {
+    Alphanumeric
+        .sample_iter(&mut OsRng)
+        .take(length)
+        .map(char::from)
+        .collect()
+}
+
 fn _main() -> Result<()> {
+    check_os_release()?;
+
     let args = Args::parse();
     let base_dir = match args.dir {
         Some(dir) => PathBuf::from(dir).canonicalize()?,
@@ -427,20 +528,207 @@ fn _main() -> Result<()> {
 
     let root = MrowFile::new(root_file)?;
     let all_steps = get_all_steps(&root)?;
-    dbg!(all_steps);
+    let aur_helper = root.config.and_then(|c| c.aur_helper);
 
-    // println!("[*] NOTE: Adjust your sudo timestamp_timeout value to be longer than the install should take otherwise it may eventually ask for authentication again.");
-    // println!("[*] NOTE: To avoid this, CTRL+C and run `sudo visudo -f $USER`. Then paste the following line:");
-    // println!("Defaults timestamp_timeout=<TIME_IN_MINUTES>");
-    // println!("---------");
-    // println!("[*] Enter your user password. The rest of the install wont require any user interaction. Go make tea!");
+    if !args.debug {
+        println!("[*] NOTE: Adjust your sudo timestamp_timeout value to be longer than the install should take otherwise it may eventually ask for authentication again.");
+        println!("[*] NOTE: To avoid this, CTRL+C and run `sudo visudo -f $USER`. Then paste the following line:");
+        println!("Defaults timestamp_timeout=<TIME_IN_MINUTES>");
+        println!("---------");
+        println!("[*] Enter your user password. The rest of the install wont require any user interaction unless it fails. Go make tea!");
 
-    // let sudo_out = std::process::Command::new("sudo").args(["ls"]).output()?;
-    // if !sudo_out.status.success() {
-    //     println!("[!] sudo check failed:");
-    //     println!("{}", String::from_utf8_lossy(sudo_out.stderr.as_slice()));
-    //     exit(-1);
-    // }
+        let sudo_out = std::process::Command::new("sudo").args(["ls"]).output()?;
+        if !sudo_out.status.success() {
+            println!("[!] sudo check failed:");
+            println!("{}", String::from_utf8_lossy(sudo_out.stderr.as_slice()));
+            exit(-1);
+        }
+    }
+
+    fn install_packages(
+        debug: bool,
+        owner: PathBuf,
+        packages: &[String],
+        aur_helper: Option<AurHelper>,
+    ) -> Result<()> {
+        let (command, flags) = if let Some(aur_helper) = aur_helper {
+            match aur_helper {
+                AurHelper::Yay => ("yay", "-Syu"),
+                AurHelper::Paru => ("paru", "-Syua"),
+            }
+        } else {
+            ("pacman", "-Syu")
+        };
+
+        if debug {
+            println!("[D] {command} {flags} {}", packages.join(" "));
+        } else {
+            let cmd = std::process::Command::new(command)
+                .arg(flags)
+                .arg("--noconfirm")
+                .args(packages)
+                .output()?;
+            if !cmd.status.success() {
+                return Err(Error::StepFailed(
+                    owner,
+                    String::from_utf8_lossy(&cmd.stderr).into_owned(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn run_commands(debug: bool, owner: PathBuf, commands: &[String]) -> Result<()> {
+        for command in commands {
+            let command_and_args = command.split(" ").collect::<Vec<_>>();
+            if debug {
+                println!("[D] {command_and_args:?}");
+            } else {
+                let cmd = std::process::Command::new(command_and_args[0])
+                    .args(&command_and_args[1..])
+                    .output()?;
+                if !cmd.status.success() {
+                    return Err(Error::StepFailed(
+                        owner,
+                        String::from_utf8_lossy(&cmd.stderr).into_owned(),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    for step in all_steps {
+        match step.kind {
+            StepKind::InstallPackage { package, aur } => {
+                if args.debug {
+                    println!("[D] InstallPackage package={package} aur={aur}");
+                }
+
+                install_packages(args.debug, step.owner.clone(), &[package], aur_helper)?;
+            }
+            StepKind::InstallPackages { packages, aur } => {
+                if args.debug {
+                    println!("[D] InstallPackages packages={packages:?} aur={aur}");
+                }
+
+                install_packages(args.debug, step.owner.clone(), &packages, aur_helper)?;
+            }
+            StepKind::WriteFile {
+                path,
+                content,
+                overwrite,
+                as_root,
+            } => {
+                if args.debug {
+                    println!("[D] WriteFile path={path:?} content={content} overwrite={overwrite} as_root={as_root}");
+                    continue;
+                }
+
+                if path.exists() && !overwrite {
+                    println!("[D] File already exists");
+                    continue;
+                }
+
+                let parent = path.parent().unwrap_or_else(|| unreachable!());
+
+                if as_root {
+                    let tmp = format!("/tmp/{}", rand_str(16));
+                    run_commands(
+                        args.debug,
+                        step.owner.clone(),
+                        &[
+                            format!("sudo mkdir -p {}", parent.to_string_lossy()),
+                            format!("echo {} | sudo tee {tmp}", content),
+                            format!("sudo chown root: {tmp}"),
+                            format!("sudo mv {tmp} {}", path.to_string_lossy()),
+                        ],
+                    )?;
+                } else {
+                    std::fs::create_dir_all(parent)?;
+                    std::fs::write(path, content)?;
+                }
+            }
+            StepKind::CopyFile { from, to, as_root } => {
+                if args.debug {
+                    println!("[D] CopyFile from={from:?} to={to:?} as_root={as_root}");
+                    continue;
+                }
+
+                let to_parent = to.parent().unwrap_or_else(|| unreachable!());
+
+                if as_root {
+                    run_commands(
+                        args.debug,
+                        step.owner.clone(),
+                        &[format!(
+                            "sudo cp {} {}",
+                            from.to_string_lossy(),
+                            to.to_string_lossy()
+                        )],
+                    )?;
+                } else {
+                    std::fs::create_dir_all(to_parent)?;
+                    std::fs::copy(from, to)?;
+                }
+            }
+            StepKind::Symlink {
+                from,
+                to,
+                delete_existing,
+            } => {
+                if args.debug {
+                    println!(
+                        "[D] Symlink from={from:?} to={to:?} delete_existing={delete_existing}"
+                    );
+                }
+
+                if to.exists() && !delete_existing {
+                    println!("[D] File already exists");
+                    continue;
+                }
+
+                if !args.debug {
+                    let to_parent = to.parent().unwrap_or_else(|| unreachable!());
+                    std::fs::create_dir_all(to_parent)?;
+
+                    if delete_existing {
+                        if to.is_dir() {
+                            std::fs::remove_dir_all(&to)?;
+                        } else {
+                            std::fs::remove_file(&to)?;
+                        }
+                    }
+                }
+
+                run_commands(
+                    args.debug,
+                    step.owner.clone(),
+                    &[format!(
+                        "ln -s {} {}",
+                        from.to_string_lossy(),
+                        to.to_string_lossy()
+                    )],
+                )?;
+            }
+            StepKind::RunCommand { command } => {
+                if args.debug {
+                    println!("[D] RunCommand command={command}");
+                }
+
+                run_commands(args.debug, step.owner.clone(), &[command])?;
+            }
+            StepKind::RunCommands { commands } => {
+                if args.debug {
+                    println!("[D] RunCommands commands={commands:?}");
+                }
+
+                run_commands(args.debug, step.owner.clone(), &commands)?;
+            }
+        }
+    }
 
     Ok(())
 }
