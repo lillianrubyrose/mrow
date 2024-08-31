@@ -280,7 +280,7 @@ impl MrowFile {
                                     .unwrap_or_default();
 
                                 CommandKind::WriteFile {
-                                    path: PathBuf::from(file_path),
+                                    path: Self::resolve_path(&file_path, &dir),
                                     content,
                                     overwrite,
                                 }
