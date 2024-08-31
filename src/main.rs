@@ -1,3 +1,6 @@
+#![warn(clippy::pedantic)]
+#![allow(clippy::too_many_lines)]
+
 use std::{
     path::{Path, PathBuf},
     process::exit,
@@ -30,7 +33,7 @@ enum Error {
     StepFailed(PathBuf, String),
 
     #[error("'{0}': {1}")]
-    TomlDeserError(PathBuf, toml::de::Error),
+    Toml(PathBuf, toml::de::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -90,8 +93,7 @@ struct RawMrowFile {
 
 impl RawMrowFile {
     fn new(path: PathBuf) -> Result<RawMrowFile> {
-        Ok(toml::from_str(&std::fs::read_to_string(&path)?)
-            .map_err(|err| Error::TomlDeserError(path, err))?)
+        toml::from_str(&std::fs::read_to_string(&path)?).map_err(|err| Error::Toml(path, err))
     }
 }
 
@@ -178,7 +180,7 @@ impl MrowFile {
         resolved_path
     }
 
-    fn new(path: PathBuf) -> Result<MrowFile> {
+    fn new(path: &Path) -> Result<MrowFile> {
         let dir = path
             .parent()
             .unwrap_or_else(|| unreachable!("Don't run in '/' you goober."))
@@ -428,7 +430,7 @@ fn gather_includes(file: &MrowFile) -> Result<Vec<MrowFile>> {
     .map(|path| file.dir.join(path))
     .map(|path| {
         if path.exists() {
-            MrowFile::new(path)
+            MrowFile::new(&path)
         } else {
             Err(Error::ImportNotFound(file.path.clone(), path))
         }
@@ -446,7 +448,7 @@ fn get_all_steps(base: &MrowFile) -> Result<Vec<Step>> {
             println!(
                 "[?] '{}' has no steps or includes.",
                 include.path.to_string_lossy()
-            )
+            );
         });
 
     let mut steps = base
@@ -483,11 +485,9 @@ fn check_os_release() -> Result<()> {
             .expect("non-standard os-release file???")
             .as_str();
 
-        if key == "ID" || key == "ID_LIKE" {
-            if value.to_lowercase() == "arch" {
-                is_arch = true;
-                break;
-            }
+        if (key == "ID" || key == "ID_LIKE") && value.to_lowercase() == "arch" {
+            is_arch = true;
+            break;
         }
     }
 
@@ -504,6 +504,61 @@ fn rand_str(length: usize) -> String {
         .take(length)
         .map(char::from)
         .collect()
+}
+
+fn install_packages(
+    debug: bool,
+    owner: PathBuf,
+    packages: &[String],
+    aur_helper: Option<AurHelper>,
+) -> Result<()> {
+    let (command, flags) = if let Some(aur_helper) = aur_helper {
+        match aur_helper {
+            AurHelper::Yay => ("yay", "-Syu"),
+            AurHelper::Paru => ("paru", "-Syua"),
+        }
+    } else {
+        ("pacman", "-Syu")
+    };
+
+    if debug {
+        println!("[D] {command} {flags} {}", packages.join(" "));
+    } else {
+        let cmd = std::process::Command::new(command)
+            .arg(flags)
+            .arg("--noconfirm")
+            .args(packages)
+            .output()?;
+        if !cmd.status.success() {
+            return Err(Error::StepFailed(
+                owner,
+                String::from_utf8_lossy(&cmd.stderr).into_owned(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn run_commands(debug: bool, owner: PathBuf, commands: &[String]) -> Result<()> {
+    for command in commands {
+        let command_and_args = command.split(' ').collect::<Vec<_>>();
+        if debug {
+            println!("[D] {command_and_args:?}");
+        } else {
+            let cmd = std::process::Command::new(command_and_args[0])
+                .args(&command_and_args[1..])
+                .output()?;
+            if !cmd.status.success() {
+                return Err(Error::StepFailed(
+                    owner,
+                    String::from_utf8_lossy(&cmd.stderr).into_owned(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn _main() -> Result<()> {
@@ -526,7 +581,7 @@ fn _main() -> Result<()> {
         exit(-1);
     }
 
-    let root = MrowFile::new(root_file)?;
+    let root = MrowFile::new(&root_file)?;
     let all_steps = get_all_steps(&root)?;
     let aur_helper = root.config.and_then(|c| c.aur_helper);
 
@@ -543,61 +598,6 @@ fn _main() -> Result<()> {
             println!("{}", String::from_utf8_lossy(sudo_out.stderr.as_slice()));
             exit(-1);
         }
-    }
-
-    fn install_packages(
-        debug: bool,
-        owner: PathBuf,
-        packages: &[String],
-        aur_helper: Option<AurHelper>,
-    ) -> Result<()> {
-        let (command, flags) = if let Some(aur_helper) = aur_helper {
-            match aur_helper {
-                AurHelper::Yay => ("yay", "-Syu"),
-                AurHelper::Paru => ("paru", "-Syua"),
-            }
-        } else {
-            ("pacman", "-Syu")
-        };
-
-        if debug {
-            println!("[D] {command} {flags} {}", packages.join(" "));
-        } else {
-            let cmd = std::process::Command::new(command)
-                .arg(flags)
-                .arg("--noconfirm")
-                .args(packages)
-                .output()?;
-            if !cmd.status.success() {
-                return Err(Error::StepFailed(
-                    owner,
-                    String::from_utf8_lossy(&cmd.stderr).into_owned(),
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    fn run_commands(debug: bool, owner: PathBuf, commands: &[String]) -> Result<()> {
-        for command in commands {
-            let command_and_args = command.split(" ").collect::<Vec<_>>();
-            if debug {
-                println!("[D] {command_and_args:?}");
-            } else {
-                let cmd = std::process::Command::new(command_and_args[0])
-                    .args(&command_and_args[1..])
-                    .output()?;
-                if !cmd.status.success() {
-                    return Err(Error::StepFailed(
-                        owner,
-                        String::from_utf8_lossy(&cmd.stderr).into_owned(),
-                    ));
-                }
-            }
-        }
-
-        Ok(())
     }
 
     for step in all_steps {
@@ -641,7 +641,7 @@ fn _main() -> Result<()> {
                         step.owner.clone(),
                         &[
                             format!("sudo mkdir -p {}", parent.to_string_lossy()),
-                            format!("echo {} | sudo tee {tmp}", content),
+                            format!("echo {content} | sudo tee {tmp}"),
                             format!("sudo chown root: {tmp}"),
                             format!("sudo mv {tmp} {}", path.to_string_lossy()),
                         ],
