@@ -378,7 +378,7 @@ fn gather_includes(file: &MrowFile) -> Result<Vec<MrowFile>> {
     .collect()
 }
 
-fn get_all_commands(base: &MrowFile) -> Result<Vec<CommandKind>> {
+fn get_all_commands(base: &MrowFile) -> Result<Vec<Command>> {
     let includes = gather_includes(base)?;
 
     includes
@@ -391,7 +391,16 @@ fn get_all_commands(base: &MrowFile) -> Result<Vec<CommandKind>> {
             )
         });
 
-    let mut commands = base.module.commands.clone();
+    let mut commands = base
+        .module
+        .commands
+        .iter()
+        .cloned()
+        .map(|kind| Command {
+            owner: base.path.clone(),
+            kind,
+        })
+        .collect::<Vec<_>>();
     for include in includes {
         commands.extend(get_all_commands(&include)?);
     }
