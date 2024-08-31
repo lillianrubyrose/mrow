@@ -158,6 +158,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
+name = "composable-utils"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "823ad55f731b16c37eadcfb1d7ff673fc280599f4e0d88a4faa6fe890ed0e12f"
+
+[[package]]
 name = "equivalent"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -276,8 +282,10 @@ name = "mrow"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "composable-utils",
  "miette",
  "serde",
+ "thiserror",
  "toml",
 ]
 

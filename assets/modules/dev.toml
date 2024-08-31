@@ -1,0 +1,2 @@
+[module]
+includes = ["dev/rust.toml"]

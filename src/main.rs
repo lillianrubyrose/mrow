@@ -1,14 +1,53 @@
 use std::{path::PathBuf, process::exit};
 
 use clap::Parser;
-use miette::{IntoDiagnostic, Result};
+use miette::IntoDiagnostic;
 use serde::Deserialize;
+use thiserror::Error;
+use toml::Value;
+
+#[derive(Debug, Error)]
+enum Error {
+    #[error("Imported module from '{0}' doesn't exist: '{1}'")]
+    ImportNotFound(PathBuf, PathBuf),
+
+    #[error("Invalid command in '{0}'. '{1}'")]
+    InvalidCommand(PathBuf, Value),
+    #[error("Invalid command in '{0}'. {1}")]
+    InvalidCommandGeneric(PathBuf, &'static str),
+    #[error("Invalid command in '{0}'. {1}")]
+    InvalidCommandGenericOwned(PathBuf, String),
+
+    #[error("'{0}': {1}")]
+    TomlDeserError(PathBuf, toml::de::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+type Result<T> = miette::Result<T, Error>;
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum Includes {
+    None,
     One(String),
     Many(Vec<String>),
+}
+
+impl Default for Includes {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl Includes {
+    fn empty(&self) -> bool {
+        match self {
+            Includes::None => true,
+            Includes::One(include) => include.is_empty(),
+            Includes::Many(includes) => includes.is_empty(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -19,41 +58,231 @@ enum AurHelper {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-struct ConfigTable {
-    includes: Option<Includes>,
+struct RawConfigTable {
     aur_helper: Option<AurHelper>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged, rename_all = "snake_case")]
-enum Command {
+struct RawModuleTable {
+    #[serde(default)]
+    includes: Includes,
+    #[serde(default)]
+    commands: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMrowFile {
+    config: Option<RawConfigTable>,
+    module: RawModuleTable,
+}
+
+impl RawMrowFile {
+    fn new(path: PathBuf) -> Result<RawMrowFile> {
+        Ok(toml::from_str(&std::fs::read_to_string(&path)?)
+            .map_err(|err| Error::TomlDeserError(path, err))?)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigTable {
+    aur_helper: Option<AurHelper>,
+}
+
+#[derive(Debug, Clone)]
+struct Command {
+    owner: PathBuf,
+    kind: CommandKind,
+}
+
+#[derive(Debug, Clone)]
+enum CommandKind {
     InstallPackage {
-        name: String,
-        #[serde(default)]
+        package: String,
         aur: bool,
     },
-    OverwriteFile {
-        content: String,
+    InstallPackages {
+        packages: Vec<String>,
+        aur: bool,
     },
-    SingleCommand(String),
+    WriteFile {
+        path: PathBuf,
+        content: String,
+        overwrite: bool,
+    },
+    CopyFile {
+        from_path: String,
+        to_path: String,
+    },
+    RunCommand {
+        command: String,
+    },
+    RunCommands {
+        commands: Vec<String>,
+    },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct ModuleTable {
-    #[serde(default)]
-    commands: Vec<Command>,
+    includes: Includes,
+    commands: Vec<CommandKind>,
 }
 
-#[derive(Debug, Deserialize)]
-struct MrowRoot {
+#[derive(Debug)]
+struct MrowFile {
+    dir: PathBuf,
+    path: PathBuf,
+
     config: Option<ConfigTable>,
-    module: Option<ModuleTable>,
+    module: ModuleTable,
 }
 
-#[derive(Debug, Deserialize)]
-struct MrowModule {
-    module: Option<ModuleTable>,
+impl MrowFile {
+    fn new(path: PathBuf) -> Result<MrowFile> {
+        let dir = path
+            .parent()
+            .unwrap_or_else(|| unreachable!("Don't run in '/' you goober."))
+            .to_path_buf();
+        let path = path.canonicalize()?;
+
+        let raw = RawMrowFile::new(path.clone())?;
+        let config = raw
+            .config
+            .map(|RawConfigTable { aur_helper }| ConfigTable { aur_helper });
+
+        let module: ModuleTable = {
+            let mut commands = Vec::with_capacity(raw.module.commands.len());
+
+            for raw in raw.module.commands {
+                let command = match raw {
+                    Value::String(command) => CommandKind::RunCommand { command },
+                    Value::Array(commands) => CommandKind::RunCommands {
+                        commands: commands
+                            .into_iter()
+                            .map(|v| {
+                                v.as_str()
+                                    .map(ToString::to_string)
+                                    .ok_or(Error::InvalidCommand(path.clone(), v))
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    },
+                    Value::Table(mut table) => {
+                        let kind = table
+                            .remove("kind")
+                            .and_then(|v| v.as_str().map(ToString::to_string))
+                            .ok_or(Error::InvalidCommandGeneric(
+                                path.clone(),
+                                "Missing command kind.",
+                            ))?;
+
+                        match kind.as_str() {
+                            "install-package" => {
+                                let package = table
+                                    .remove("package")
+                                    .and_then(|v| v.as_str().map(ToString::to_string))
+                                    .ok_or(Error::InvalidCommandGeneric(
+                                        path.clone(),
+                                        "Missing 'package' key in install-package command.",
+                                    ))?;
+
+                                let aur = table
+                                    .remove("aur")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or_default();
+
+                                CommandKind::InstallPackage { package, aur }
+                            }
+
+                            "install-packages" => {
+                                let packages = table
+                                    .remove("packages")
+                                    .and_then(|v| match v {
+                                        Value::Array(v) => Some(v),
+                                        _ => None,
+                                    })
+                                    .ok_or(Error::InvalidCommandGeneric(
+                                        path.clone(),
+                                        "Missing 'package' key in install-package command.",
+                                    ))?
+                                    .into_iter()
+                                    .map(|v| {
+                                        v.as_str()
+                                            .map(ToString::to_string)
+                                            .ok_or(Error::InvalidCommand(path.clone(), v))
+                                    })
+                                    .collect::<Result<Vec<_>>>()?;
+
+                                let aur = table
+                                    .remove("aur")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or_default();
+
+                                CommandKind::InstallPackages { packages, aur }
+                            }
+
+                            "write-file" => {
+                                let file_path = table
+                                    .remove("path")
+                                    .map(|v| {
+                                        v.as_str()
+                                            .map(ToString::to_string)
+                                            .ok_or(Error::InvalidCommand(path.clone(), v))
+                                    })
+                                    .ok_or(Error::InvalidCommandGeneric(
+                                        path.clone(),
+                                        "Missing 'path' key in write-file command.",
+                                    ))??;
+
+                                let content = table
+                                    .remove("content")
+                                    .map(|v| {
+                                        v.as_str()
+                                            .map(ToString::to_string)
+                                            .ok_or(Error::InvalidCommand(path.clone(), v))
+                                    })
+                                    .ok_or(Error::InvalidCommandGeneric(
+                                        path.clone(),
+                                        "Missing 'content' key in write-file command.",
+                                    ))??;
+
+                                let overwrite = table
+                                    .remove("overwrite")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or_default();
+
+                                CommandKind::WriteFile {
+                                    path: PathBuf::from(file_path),
+                                    content,
+                                    overwrite,
+                                }
+                            }
+
+                            _ => {
+                                return Err(Error::InvalidCommandGenericOwned(
+                                    path.clone(),
+                                    format!("Invalid command kind: {kind}"),
+                                ))
+                            }
+                        }
+                    }
+
+                    value => return Err(Error::InvalidCommand(path.clone(), value)),
+                };
+                commands.push(command);
+            }
+
+            ModuleTable {
+                includes: raw.module.includes,
+                commands,
+            }
+        };
+
+        Ok(MrowFile {
+            dir,
+            path,
+            config,
+            module,
+        })
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -64,11 +293,49 @@ struct Args {
     dir: Option<String>,
 }
 
-fn main() -> Result<()> {
+fn gather_includes(file: &MrowFile) -> Result<Vec<MrowFile>> {
+    match &file.module.includes {
+        Includes::None => vec![],
+        Includes::One(include) => vec![PathBuf::from(include)],
+        Includes::Many(includes) => includes.iter().map(PathBuf::from).collect(),
+    }
+    .into_iter()
+    .map(|path| file.dir.join(path))
+    .map(|path| {
+        if path.exists() {
+            MrowFile::new(path)
+        } else {
+            Err(Error::ImportNotFound(file.path.clone(), path))
+        }
+    })
+    .collect()
+}
+
+fn get_all_commands(base: &MrowFile) -> Result<Vec<CommandKind>> {
+    let includes = gather_includes(base)?;
+
+    includes
+        .iter()
+        .filter(|include| include.module.commands.is_empty() && include.module.includes.empty())
+        .for_each(|include| {
+            println!(
+                "[?] '{}' has no commands or includes.",
+                include.path.to_string_lossy()
+            )
+        });
+
+    let mut commands = base.module.commands.clone();
+    for include in includes {
+        commands.extend(get_all_commands(&include)?);
+    }
+    Ok(commands)
+}
+
+fn _main() -> Result<()> {
     let args = Args::parse();
     let base_dir = match args.dir {
-        Some(dir) => PathBuf::from(dir).canonicalize().into_diagnostic()?,
-        None => std::env::current_dir().into_diagnostic()?,
+        Some(dir) => PathBuf::from(dir).canonicalize()?,
+        None => std::env::current_dir()?,
     };
 
     if !base_dir.exists() {
@@ -76,51 +343,33 @@ fn main() -> Result<()> {
         exit(-1);
     }
 
-    let mrow_file = base_dir.join("mrow.toml");
-    if !mrow_file.exists() {
+    let root_file = base_dir.join("mrow.toml");
+    if !root_file.exists() {
         println!("[!] No mrow.toml found in '{}'", base_dir.to_string_lossy());
         exit(-1);
     }
 
-    let root: MrowRoot =
-        toml::from_str(&std::fs::read_to_string(mrow_file).into_diagnostic()?).into_diagnostic()?;
-    if root.config.is_none() && root.module.is_none() {
-        println!("[!] There's neither a [config] or [module] table in your mrow.toml");
-        exit(-1);
-    }
+    let root = MrowFile::new(root_file)?;
+    let all_commands = get_all_commands(&root)?;
+    dbg!(all_commands);
 
-    let included_modules: Vec<MrowModule> = root
-        .config
-        .as_ref()
-        .map(|v| {
-            v.includes.as_ref().map(|includes| match includes {
-                Includes::One(include) => vec![PathBuf::from(include)],
-                Includes::Many(includes) => includes.iter().map(PathBuf::from).collect(),
-            })
-        })
-        .unwrap_or_default()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|path| std::fs::read_to_string(base_dir.join(path)))
-        .collect::<std::io::Result<Vec<String>>>()
-        .into_diagnostic()?
-        .into_iter()
-        .map(|content| toml::from_str(&content))
-        .collect::<Result<Vec<MrowModule>, toml::de::Error>>()
-        .into_diagnostic()?;
+    // println!("[*] NOTE: Adjust your sudo timestamp_timeout value to be longer than the install should take otherwise it may eventually ask for authentication again.");
+    // println!("[*] NOTE: To avoid this, CTRL+C and run `sudo visudo -f $USER`. Then paste the following line:");
+    // println!("Defaults timestamp_timeout=<TIME_IN_MINUTES>");
+    // println!("---------");
+    // println!("[*] Enter your user password. The rest of the install wont require any user interaction. Go make tea!");
 
-    let mut commands: Vec<Command> = root
-        .module
-        .map(|module| module.commands)
-        .unwrap_or_default();
+    // let sudo_out = std::process::Command::new("sudo").args(["ls"]).output()?;
+    // if !sudo_out.status.success() {
+    //     println!("[!] sudo check failed:");
+    //     println!("{}", String::from_utf8_lossy(sudo_out.stderr.as_slice()));
+    //     exit(-1);
+    // }
 
-    for module in included_modules {
-        if let Some(module) = module.module {
-            commands.extend(module.commands);
-        }
-    }
+    Ok(())
+}
 
-    dbg!(commands);
-
+fn main() -> miette::Result<()> {
+    _main().into_diagnostic()?;
     Ok(())
 }
