@@ -1,0 +1,13 @@
+[module]
+commands = [
+    { kind = "install-packages", packages = [
+        "fish",
+        "hyfetch",
+        "bat",
+        "exa",
+        "ripgrep",
+    ] },
+
+    # These can be paths like ./dots/fish or absolute paths.
+    { kind = "symlink", from = "dots/fish", to = "~/.config/fish", delete-existing = true },
+]

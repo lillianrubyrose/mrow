@@ -1,0 +1,17 @@
+[module]
+commands = [
+    { kind = "install-packages", packages = [
+        "hyprland",
+        "foot",
+
+        # audio
+        "pipewire",
+        "pipewire-pulse",
+        "pulsemixer",
+
+        # misc
+        "bluez",
+        "bluez-utils",
+        "wl-clipboard",
+    ] },
+]

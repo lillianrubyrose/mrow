@@ -1,4 +1,7 @@
-use std::{path::PathBuf, process::exit};
+use std::{
+    path::{Path, PathBuf},
+    process::exit,
+};
 
 use clap::Parser;
 use miette::IntoDiagnostic;
@@ -113,6 +116,11 @@ enum CommandKind {
         from_path: String,
         to_path: String,
     },
+    Symlink {
+        from: PathBuf,
+        to: PathBuf,
+        delete_existing: bool,
+    },
     RunCommand {
         command: String,
     },
@@ -137,6 +145,28 @@ struct MrowFile {
 }
 
 impl MrowFile {
+    /// Resolves a given path string to an absolute path.
+    ///
+    /// This function handles the following cases:
+    /// - If the path starts with `~`, it expands it to the user's home directory.
+    /// - If the path is relative, it joins it with the provided `base_path`.
+    /// - If the path is already absolute, it is returned as is.
+    fn resolve_path(from_path: &str, base_path: &Path) -> PathBuf {
+        let mut resolved_path = PathBuf::from(from_path);
+
+        // Expand the home directory symbol
+        if resolved_path.starts_with("~/") {
+            if let Some(home_dir) = dirs::home_dir() {
+                let home_str = home_dir.to_string_lossy();
+                resolved_path = PathBuf::from(&*home_str).join(&from_path[2..]);
+            }
+        } else if resolved_path.is_relative() {
+            resolved_path = base_path.join(resolved_path);
+        }
+
+        resolved_path
+    }
+
     fn new(path: PathBuf) -> Result<MrowFile> {
         let dir = path
             .parent()
@@ -253,6 +283,43 @@ impl MrowFile {
                                     path: PathBuf::from(file_path),
                                     content,
                                     overwrite,
+                                }
+                            }
+
+                            "symlink" => {
+                                let from_path = table
+                                    .remove("from")
+                                    .map(|v| {
+                                        v.as_str()
+                                            .map(ToString::to_string)
+                                            .ok_or(Error::InvalidCommand(path.clone(), v))
+                                    })
+                                    .ok_or(Error::InvalidCommandGeneric(
+                                        path.clone(),
+                                        "Missing 'from' key in write-file command.",
+                                    ))??;
+
+                                let to_path = table
+                                    .remove("to")
+                                    .map(|v| {
+                                        v.as_str()
+                                            .map(ToString::to_string)
+                                            .ok_or(Error::InvalidCommand(path.clone(), v))
+                                    })
+                                    .ok_or(Error::InvalidCommandGeneric(
+                                        path.clone(),
+                                        "Missing 'to' key in write-file command.",
+                                    ))??;
+
+                                let delete_existing = table
+                                    .remove("delete-existing")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or_default();
+
+                                CommandKind::Symlink {
+                                    from: Self::resolve_path(&from_path, &dir),
+                                    to: Self::resolve_path(&to_path, &dir),
+                                    delete_existing,
                                 }
                             }
 

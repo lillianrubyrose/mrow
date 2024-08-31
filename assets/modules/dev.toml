@@ -1,2 +1,8 @@
 [module]
 includes = ["dev/rust.toml"]
+
+commands = [
+    { kind = "install-packages", packages = [
+        "zed-preview-bin",
+    ], aur = true },
+]

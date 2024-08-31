@@ -1,0 +1,11 @@
+[module]
+commands = [
+    { kind = "install-packages", packages = [
+        "btop",
+    ] },
+    { kind = "install-packages", packages = [
+        "mercury-browser-avx2-bin",
+        "obs-studio-liberty",
+        "vesktop-bin",
+    ], aur = true },
+]
