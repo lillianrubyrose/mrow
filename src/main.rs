@@ -137,6 +137,9 @@ enum StepKind {
     RunCommands {
         commands: Vec<String>,
     },
+    RunScript {
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug)]
@@ -330,6 +333,24 @@ impl MrowFile {
                                     from: Self::resolve_path(&from_path, &dir),
                                     to: Self::resolve_path(&to_path, &dir),
                                     delete_existing,
+                                }
+                            }
+
+                            "run-script" => {
+                                let script_path = table
+                                    .remove("path")
+                                    .map(|v| {
+                                        v.as_str()
+                                            .map(ToString::to_string)
+                                            .ok_or(Error::InvalidStep(path.clone(), v))
+                                    })
+                                    .ok_or(Error::InvalidStepGeneric(
+                                        path.clone(),
+                                        "Missing 'from' key in write-file step.",
+                                    ))??;
+
+                                StepKind::RunScript {
+                                    path: Self::resolve_path(&script_path, &dir),
                                 }
                             }
 
@@ -685,7 +706,7 @@ fn _main() -> Result<()> {
                     let to_parent = to.parent().unwrap_or_else(|| unreachable!());
                     std::fs::create_dir_all(to_parent)?;
 
-                    if delete_existing {
+                    if delete_existing && to.exists() {
                         if to.is_dir() {
                             std::fs::remove_dir_all(&to)?;
                         } else {
@@ -717,6 +738,23 @@ fn _main() -> Result<()> {
                 }
 
                 run_commands(args.debug, step.owner.clone(), &commands)?;
+            }
+            StepKind::RunScript { path } => {
+                if args.debug {
+                    println!("[D] RunScript path={path:?}");
+                }
+
+                run_command_raw(
+                    args.debug,
+                    step.owner.clone(),
+                    "sh",
+                    &[&path.to_string_lossy().into_owned()],
+                    &path
+                        .parent()
+                        .unwrap_or_else(|| unreachable!())
+                        .to_string_lossy()
+                        .into_owned(),
+                )?;
             }
         }
     }
