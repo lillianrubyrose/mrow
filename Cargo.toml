@@ -5,10 +5,8 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.5.16", features = ["derive"] }
-composable-utils = "0.1.0"
 dirs = "5.0.1"
 miette = { version = "7.2.0", features = ["fancy"] }
-rand = "0.8.5"
 regex = "1.10.6"
 serde = { version = "1.0.209", features = ["derive"] }
 thiserror = "1.0.63"

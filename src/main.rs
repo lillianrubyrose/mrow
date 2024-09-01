@@ -2,13 +2,14 @@
 #![allow(clippy::too_many_lines)]
 
 use std::{
+    env::VarError,
+    ffi::OsStr,
     path::{Path, PathBuf},
     process::exit,
 };
 
 use clap::Parser;
 use miette::IntoDiagnostic;
-use rand::{distributions::Alphanumeric, prelude::Distribution, rngs::OsRng};
 use regex::Regex;
 use serde::Deserialize;
 use thiserror::Error;
@@ -36,6 +37,8 @@ enum Error {
     Toml(PathBuf, toml::de::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Var(#[from] VarError),
 }
 
 type Result<T> = miette::Result<T, Error>;
@@ -117,12 +120,6 @@ enum StepKind {
     InstallPackages {
         packages: Vec<String>,
         aur: bool,
-    },
-    WriteFile {
-        path: PathBuf,
-        content: String,
-        overwrite: bool,
-        as_root: bool,
     },
     CopyFile {
         from: PathBuf,
@@ -260,49 +257,6 @@ impl MrowFile {
                                     .unwrap_or_default();
 
                                 StepKind::InstallPackages { packages, aur }
-                            }
-
-                            "write-file" => {
-                                let file_path = table
-                                    .remove("path")
-                                    .map(|v| {
-                                        v.as_str()
-                                            .map(ToString::to_string)
-                                            .ok_or(Error::InvalidStep(path.clone(), v))
-                                    })
-                                    .ok_or(Error::InvalidStepGeneric(
-                                        path.clone(),
-                                        "Missing 'path' key in write-file step.",
-                                    ))??;
-
-                                let content = table
-                                    .remove("content")
-                                    .map(|v| {
-                                        v.as_str()
-                                            .map(ToString::to_string)
-                                            .ok_or(Error::InvalidStep(path.clone(), v))
-                                    })
-                                    .ok_or(Error::InvalidStepGeneric(
-                                        path.clone(),
-                                        "Missing 'content' key in write-file step.",
-                                    ))??;
-
-                                let overwrite = table
-                                    .remove("overwrite")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or_default();
-
-                                let as_root = table
-                                    .remove("as-root")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or_default();
-
-                                StepKind::WriteFile {
-                                    path: Self::resolve_path(&file_path, &dir),
-                                    content,
-                                    overwrite,
-                                    as_root,
-                                }
                             }
 
                             "copy-file" => {
@@ -498,37 +452,55 @@ fn check_os_release() -> Result<()> {
     Ok(())
 }
 
-fn rand_str(length: usize) -> String {
-    Alphanumeric
-        .sample_iter(&mut OsRng)
-        .take(length)
-        .map(char::from)
-        .collect()
-}
-
 fn install_packages(
     debug: bool,
     owner: PathBuf,
     packages: &[String],
+    aur_flag: bool,
     aur_helper: Option<AurHelper>,
 ) -> Result<()> {
-    let (command, flags) = if let Some(aur_helper) = aur_helper {
+    let (command, extra_args) = if let Some(aur_helper) = aur_helper {
         match aur_helper {
-            AurHelper::Yay => ("yay", "-Syu"),
-            AurHelper::Paru => ("paru", "-Syua"),
+            AurHelper::Yay => ("yay", vec!["-Sy"]),
+            AurHelper::Paru => ("paru", if aur_flag { vec!["-Sya"] } else { vec!["-Sy"] }),
         }
     } else {
-        ("pacman", "-Syu")
+        ("sudo", vec!["pacman", "-Sy"])
     };
 
     if debug {
-        println!("[D] {command} {flags} {}", packages.join(" "));
+        println!("[D] {command} {extra_args:?} {}", packages.join(" "));
     } else {
         let cmd = std::process::Command::new(command)
-            .arg(flags)
+            .args(extra_args)
             .arg("--noconfirm")
             .arg("--needed")
             .args(packages)
+            .output()?;
+        if !cmd.status.success() {
+            return Err(Error::StepFailed(
+                owner,
+                String::from_utf8_lossy(&cmd.stderr).into_owned(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn run_command_raw<S: AsRef<OsStr>>(
+    debug: bool,
+    owner: PathBuf,
+    command: &str,
+    args: &[S],
+    dir: &str,
+) -> Result<()> {
+    if debug {
+        println!("[D] {command:?}");
+    } else {
+        let cmd = std::process::Command::new(command)
+            .args(args)
+            .current_dir(dir)
             .output()?;
         if !cmd.status.success() {
             return Err(Error::StepFailed(
@@ -595,9 +567,12 @@ fn _main() -> Result<()> {
     let all_steps = get_all_steps(&root)?;
     let aur_helper = root.config.and_then(|c| c.aur_helper);
 
+    let username = std::env::var("USER")?;
+
     if !args.debug {
+        println!("[*] NOTE: If the expected username is not '{username}' then CTRL-C and re-run!");
         println!("[*] NOTE: Adjust your sudo timestamp_timeout value to be longer than the install should take otherwise it may eventually ask for authentication again.");
-        println!("[*] NOTE: To avoid this, CTRL+C and run `sudo visudo -f $USER`. Then paste the following line:");
+        println!("[*] NOTE: To avoid this, CTRL+C and run `sudo visudo -f {username}`. Then paste the following line:");
         println!("Defaults timestamp_timeout=<TIME_IN_MINUTES>");
         println!("---------");
         println!("[*] Enter your user password. The rest of the install wont require any user interaction unless it fails. Go make tea!");
@@ -616,74 +591,56 @@ fn _main() -> Result<()> {
             AurHelper::Paru => "paru-bin",
         };
 
-        install_packages(
-            args.debug,
-            root.path.clone(),
-            &["base-devel".into(), "git".into()],
-            None,
-        )?;
+        match run_command(args.debug, root.path.clone(), &format!("pacman -Qi {name}")) {
+            Ok(()) => {
+                println!("[*] Skipping {name} install as you already have the package present");
+            }
+            Err(Error::StepFailed(_, _)) => {
+                install_packages(
+                    args.debug,
+                    root.path.clone(),
+                    &["base-devel".into(), "git".into()],
+                    false,
+                    None,
+                )?;
 
-        run_commands(
-            args.debug,
-            root.path,
-            &[
-                format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
-                format!("sudo chown -R $USER: /opt/{name}"),
-                format!("cd /opt/{name} && makepkg -si --noconfirm"),
-            ],
-        )?;
+                run_commands(
+                    args.debug,
+                    root.path.clone(),
+                    &[
+                        format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
+                        format!("sudo chown -R {username}: /opt/{name}"),
+                    ],
+                )?;
+
+                run_command_raw(
+                    args.debug,
+                    root.path,
+                    "makepkg",
+                    &["-si", "--noconfirm"],
+                    &format!("/opt/{name}"),
+                )?;
+            }
+            Err(err) => Err(err)?,
+        }
     }
 
-    for step in all_steps {
+    for (index, step) in all_steps.into_iter().enumerate() {
+        println!("[?] Running step {}", index + 1);
         match step.kind {
             StepKind::InstallPackage { package, aur } => {
                 if args.debug {
                     println!("[D] InstallPackage package={package} aur={aur}");
                 }
 
-                install_packages(args.debug, step.owner.clone(), &[package], aur_helper)?;
+                install_packages(args.debug, step.owner.clone(), &[package], aur, aur_helper)?;
             }
             StepKind::InstallPackages { packages, aur } => {
                 if args.debug {
                     println!("[D] InstallPackages packages={packages:?} aur={aur}");
                 }
 
-                install_packages(args.debug, step.owner.clone(), &packages, aur_helper)?;
-            }
-            StepKind::WriteFile {
-                path,
-                content,
-                overwrite,
-                as_root,
-            } => {
-                if args.debug {
-                    println!("[D] WriteFile path={path:?} content={content} overwrite={overwrite} as_root={as_root}");
-                    continue;
-                }
-
-                if path.exists() && !overwrite {
-                    println!("[D] File already exists");
-                    continue;
-                }
-
-                let parent = path.parent().unwrap_or_else(|| unreachable!());
-
-                if as_root {
-                    let tmp = format!("/tmp/{}", rand_str(16));
-                    run_commands(
-                        args.debug,
-                        step.owner.clone(),
-                        &[
-                            format!("sudo mkdir -p {}", parent.to_string_lossy()),
-                            format!("echo {content} | sudo tee {tmp}"),
-                            format!("sudo chown root: {tmp}"),
-                            format!("sudo mv {tmp} {}", path.to_string_lossy()),
-                        ],
-                    )?;
-                } else {
-                    std::fs::create_dir_all(parent)?;
-                    std::fs::write(path, content)?;
-                }
+                install_packages(args.debug, step.owner.clone(), &packages, aur, aur_helper)?;
             }
             StepKind::CopyFile { from, to, as_root } => {
                 if args.debug {
