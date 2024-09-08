@@ -1,4 +1,23 @@
 [config]
-aur-helper = "paru"
+aur-helper = "yay"
 
 [module]
+steps = [
+   { kind = "install-package", package = "firefox" },
+   { kind = "install-package", package = "zed-preview-bin", aur = true },
+
+   { kind = "install-packages", packages = [
+      "kitty",
+      "fish",
+   ] },
+
+   { kind = "install-packages", packages = [
+      "vesktop",
+      "prismlauncher-qt5-bin",
+   ], aur = true },
+
+   [
+      "sudo pacman -Sy --needed --noconfirm fastfetch",
+      "sudo pacman -Sy --needed --noconfirm base-devel git clang",
+   ],
+]

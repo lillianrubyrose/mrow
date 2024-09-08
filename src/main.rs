@@ -9,6 +9,7 @@ use std::{
 };
 
 use clap::Parser;
+use log::{debug, error, info, warn};
 use miette::IntoDiagnostic;
 use regex::Regex;
 use serde::Deserialize;
@@ -17,7 +18,7 @@ use toml::Value;
 
 #[derive(Debug, Error)]
 enum Error {
-	#[error("This tool is made to work with Arch Linux and may work with some derivatives")]
+	#[error("This tool is made for Arch Linux, if you're running an Arch derivative and still getting this message open an issue @ https://github.com/lillianrubyrose/mrow")]
 	NotArch,
 
 	#[error("Imported module from '{0}' doesn't exist: '{1}'")]
@@ -108,6 +109,7 @@ struct ConfigTable {
 #[derive(Debug, Clone)]
 struct Step {
 	owner: PathBuf,
+	relative_path_str: String,
 	kind: StepKind,
 }
 
@@ -153,6 +155,9 @@ struct MrowFile {
 	dir: PathBuf,
 	path: PathBuf,
 
+	/// This is relative to the root mrow.toml
+	relative_path_str: String,
+
 	config: Option<ConfigTable>,
 	module: ModuleTable,
 }
@@ -180,7 +185,24 @@ impl MrowFile {
 		resolved_path
 	}
 
-	fn new(path: &Path) -> Result<MrowFile> {
+	fn new(root_dir: &Path, path: &Path) -> Result<MrowFile> {
+		let relative_path = {
+			if root_dir == PathBuf::new() {
+				PathBuf::from("mrow.toml")
+			} else {
+				let mut parts = vec![];
+				let mut parent = path.parent().unwrap_or_else(|| unreachable!());
+				while parent != root_dir {
+					parts.push(parent.file_name().unwrap_or_else(|| unreachable!()));
+					parent = parent.parent().unwrap_or_else(|| unreachable!());
+				}
+
+				PathBuf::new()
+					.join(parts.into_iter().rev().collect::<PathBuf>())
+					.join(path.file_name().unwrap_or_else(|| unreachable!()))
+			}
+		};
+
 		let dir = path
 			.parent()
 			.unwrap_or_else(|| unreachable!("Don't run in '/' you goober."))
@@ -365,6 +387,7 @@ impl MrowFile {
 		Ok(MrowFile {
 			dir,
 			path,
+			relative_path_str: relative_path.to_string_lossy().into_owned(),
 			config,
 			module,
 		})
@@ -383,7 +406,7 @@ struct Args {
 	debug: bool,
 }
 
-fn gather_includes(file: &MrowFile) -> Result<Vec<MrowFile>> {
+fn gather_includes(root_dir: &Path, file: &MrowFile) -> Result<Vec<MrowFile>> {
 	match &file.module.includes {
 		Includes::None => vec![],
 		Includes::One(include) => vec![PathBuf::from(include)],
@@ -393,7 +416,7 @@ fn gather_includes(file: &MrowFile) -> Result<Vec<MrowFile>> {
 	.map(|path| file.dir.join(path))
 	.map(|path| {
 		if path.exists() {
-			MrowFile::new(&path)
+			MrowFile::new(root_dir, &path)
 		} else {
 			Err(Error::ImportNotFound(file.path.clone(), path))
 		}
@@ -401,8 +424,8 @@ fn gather_includes(file: &MrowFile) -> Result<Vec<MrowFile>> {
 	.collect()
 }
 
-fn get_all_steps(base: &MrowFile) -> Result<Vec<Step>> {
-	let includes = gather_includes(base)?;
+fn get_all_steps(root_dir: &Path, base: &MrowFile) -> Result<Vec<Step>> {
+	let includes = gather_includes(root_dir, base)?;
 
 	includes
 		.iter()
@@ -418,11 +441,12 @@ fn get_all_steps(base: &MrowFile) -> Result<Vec<Step>> {
 		.cloned()
 		.map(|kind| Step {
 			owner: base.path.clone(),
+			relative_path_str: base.relative_path_str.clone(),
 			kind,
 		})
 		.collect::<Vec<_>>();
 	for include in includes {
-		steps.extend(get_all_steps(&include)?);
+		steps.extend(get_all_steps(root_dir, &include)?);
 	}
 	Ok(steps)
 }
@@ -465,15 +489,16 @@ fn install_packages(
 		("sudo", vec!["pacman", "-Sy"])
 	};
 
+	let mut cmd = std::process::Command::new(command);
+	cmd.args(extra_args.clone())
+		.arg("--noconfirm")
+		.arg("--needed")
+		.args(packages);
+
 	if debug {
-		println!("[D] {command} {extra_args:?} {}", packages.join(" "));
+		debug!("{cmd:?}");
 	} else {
-		let cmd = std::process::Command::new(command)
-			.args(extra_args)
-			.arg("--noconfirm")
-			.arg("--needed")
-			.args(packages)
-			.output()?;
+		let cmd = cmd.output()?;
 		if !cmd.status.success() {
 			return Err(Error::StepFailed(
 				owner,
@@ -486,13 +511,13 @@ fn install_packages(
 }
 
 fn run_command_raw<S: AsRef<OsStr>>(debug: bool, owner: PathBuf, command: &str, args: &[S], dir: &str) -> Result<()> {
+	let mut cmd = std::process::Command::new(command);
+	cmd.args(args).current_dir(dir);
+
 	if debug {
-		println!("[D] {command:?}");
+		debug!("{cmd:?}");
 	} else {
-		let cmd = std::process::Command::new(command)
-			.args(args)
-			.current_dir(dir)
-			.output()?;
+		let cmd = cmd.output()?;
 		if !cmd.status.success() {
 			return Err(Error::StepFailed(
 				owner,
@@ -506,12 +531,13 @@ fn run_command_raw<S: AsRef<OsStr>>(debug: bool, owner: PathBuf, command: &str, 
 
 fn run_command(debug: bool, owner: PathBuf, command: &str) -> Result<()> {
 	let command_and_args = command.split(' ').collect::<Vec<_>>();
+	let mut cmd = std::process::Command::new(command_and_args[0]);
+	cmd.args(&command_and_args[1..]);
+
 	if debug {
-		println!("[D] {command_and_args:?}");
+		debug!("{cmd:?}");
 	} else {
-		let cmd = std::process::Command::new(command_and_args[0])
-			.args(&command_and_args[1..])
-			.output()?;
+		let cmd = cmd.output()?;
 		if !cmd.status.success() {
 			return Err(Error::StepFailed(
 				owner,
@@ -535,6 +561,8 @@ fn run_commands(debug: bool, owner: PathBuf, commands: &[String]) -> Result<()> 
 }
 
 fn _main() -> Result<()> {
+	colog::default_builder().filter_level(log::LevelFilter::Debug).init();
+
 	check_os_release()?;
 
 	let args = Args::parse();
@@ -544,44 +572,47 @@ fn _main() -> Result<()> {
 	};
 
 	if !base_dir.exists() {
-		println!("[!] '{}' doesn't exist!", base_dir.to_string_lossy());
+		error!("Dir '{}' doesn't exist!", base_dir.to_string_lossy());
 		exit(-1);
 	}
 
 	let root_file = base_dir.join("mrow.toml");
 	if !root_file.exists() {
-		println!("[!] No mrow.toml found in '{}'", base_dir.to_string_lossy());
+		error!("No mrow.toml found in '{}'", base_dir.to_string_lossy());
 		exit(-1);
 	}
 
-	let root = MrowFile::new(&root_file)?;
-	let all_steps = get_all_steps(&root)?;
+	let root = MrowFile::new(&PathBuf::new(), &root_file)?;
+	let all_steps = get_all_steps(&root.dir, &root)?;
 	let aur_helper = root.config.and_then(|c| c.aur_helper);
 
 	let username = std::env::var("USER")?;
 
-	if !args.debug {
-		println!("[*] NOTE: If the expected username is not '{username}' then CTRL-C and re-run!");
-		println!(
-			"[*] NOTE: Adjust your sudo timestamp_timeout value to be longer than the install should take otherwise \
-			 it may eventually ask for authentication again."
-		);
-		println!("[*] NOTE: To avoid this, CTRL+C and run `sudo visudo -f {username}`. Then paste the following line:");
-		println!("Defaults timestamp_timeout=<TIME_IN_MINUTES>");
-		println!("---------");
-		println!(
-			"[*] Enter your user password. The rest of the install wont require any user interaction unless it fails. \
-			 Go make tea!"
-		);
+	warn!("If the expected username is not '{username}' then CTRL-C and re-run!");
+	warn!(
+		"Adjust your sudo timestamp_timeout value to be longer than the install should take otherwise it may \
+		 eventually ask for authentication again."
+	);
+	warn!(
+		"To avoid this, CTRL+C and run `sudo visudo -f {username}`. Then paste the following line:Defaults \
+		 timestamp_timeout=<TIME_IN_MINUTES>"
+	);
+	println!();
+	info!(
+		"Enter your user password. The rest of the install wont require any user interaction unless it fails.Go make \
+		 tea!"
+	);
 
+	if !args.debug {
 		let sudo_out = std::process::Command::new("sudo").args(["ls"]).output()?;
 		if !sudo_out.status.success() {
-			println!("[!] sudo check failed:");
-			println!("{}", String::from_utf8_lossy(sudo_out.stderr.as_slice()));
+			error!("sudo elevation failed:");
+			error!("{}", String::from_utf8_lossy(sudo_out.stderr.as_slice()));
 			exit(-1);
 		}
 	}
 
+	println!();
 	if let Some(aur_helper) = aur_helper {
 		let name = match aur_helper {
 			AurHelper::Yay => "yay",
@@ -590,9 +621,12 @@ fn _main() -> Result<()> {
 
 		match run_command(args.debug, root.path.clone(), &format!("pacman -Qi {name}")) {
 			Ok(()) => {
-				println!("[*] Skipping {name} install as you already have the package present");
+				info!("AUR helper {name} is already installed, skipping install");
 			}
 			Err(Error::StepFailed(..)) => {
+				info!("AUR helper {name} not installed, installing now!");
+
+				info!("Installing prerequisite packages (base-devel group and git)");
 				install_packages(
 					args.debug,
 					root.path.clone(),
@@ -601,11 +635,13 @@ fn _main() -> Result<()> {
 					None,
 				)?;
 
+				info!("Cloning {name} repo into /opt/{name}");
 				run_commands(args.debug, root.path.clone(), &[
 					format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
 					format!("sudo chown -R {username}: /opt/{name}"),
 				])?;
 
+				info!("Building and installing {name}");
 				run_command_raw(
 					args.debug,
 					root.path,
@@ -613,72 +649,91 @@ fn _main() -> Result<()> {
 					&["-si", "--noconfirm"],
 					&format!("/opt/{name}"),
 				)?;
+
+				info!("{name} installed");
 			}
 			Err(err) => Err(err)?,
 		}
 	}
 
-	for (index, step) in all_steps.into_iter().enumerate() {
-		println!("[?] Running step {}", index + 1);
+	for step in all_steps {
 		match step.kind {
 			StepKind::InstallPackage { package, aur } => {
-				if args.debug {
-					println!("[D] InstallPackage package={package} aur={aur}");
-				}
+				info!(
+					"[{}]: Installing {}package: {}",
+					step.relative_path_str,
+					if aur { "AUR " } else { "" },
+					package
+				);
 
-				install_packages(args.debug, step.owner.clone(), &[package], aur, aur_helper)?;
+				install_packages(
+					args.debug,
+					step.owner.clone(),
+					&[package],
+					aur,
+					aur_helper.filter(|_| aur),
+				)?;
 			}
 			StepKind::InstallPackages { packages, aur } => {
-				if args.debug {
-					println!("[D] InstallPackages packages={packages:?} aur={aur}");
-				}
+				info!(
+					"[{}]: Installing {}packages:\n{}",
+					step.relative_path_str,
+					if aur { "AUR " } else { "" },
+					packages.join("\n")
+				);
 
-				install_packages(args.debug, step.owner.clone(), &packages, aur, aur_helper)?;
+				install_packages(
+					args.debug,
+					step.owner.clone(),
+					&packages,
+					aur,
+					aur_helper.filter(|_| aur),
+				)?;
 			}
 			StepKind::CopyFile { from, to, as_root } => {
-				if args.debug {
-					println!("[D] CopyFile from={from:?} to={to:?} as_root={as_root}");
-					continue;
-				}
+				info!(
+					"[{}]: Copying file '{}' to '{}'{}",
+					step.relative_path_str,
+					from.to_string_lossy(),
+					to.to_string_lossy(),
+					if as_root { " as root" } else { "" }
+				);
 
-				let to_parent = to.parent().unwrap_or_else(|| unreachable!());
-
-				if as_root {
-					run_commands(args.debug, step.owner.clone(), &[format!(
-						"sudo cp {} {}",
-						from.to_string_lossy(),
-						to.to_string_lossy()
-					)])?;
-				} else {
-					std::fs::create_dir_all(to_parent)?;
-					std::fs::copy(from, to)?;
-				}
+				run_commands(args.debug, step.owner.clone(), &[format!(
+					"{}cp {} {}",
+					if as_root { "sudo " } else { "" },
+					from.to_string_lossy(),
+					to.to_string_lossy()
+				)])?;
 			}
 			StepKind::Symlink {
 				from,
 				to,
 				delete_existing,
 			} => {
-				if args.debug {
-					println!("[D] Symlink from={from:?} to={to:?} delete_existing={delete_existing}");
-				}
+				info!(
+					"[{}]: Creating symlink from '{}' to '{}'{}",
+					step.relative_path_str,
+					from.to_string_lossy(),
+					to.to_string_lossy(),
+					if delete_existing {
+						" deleting anything in its current place"
+					} else {
+						""
+					}
+				);
 
 				if to.exists() && !delete_existing {
-					println!("[D] File already exists");
+					warn!("Not creating symlink as the destination already exists");
 					continue;
 				}
 
-				if !args.debug {
+				if to.exists() {
 					let to_parent = to.parent().unwrap_or_else(|| unreachable!());
-					std::fs::create_dir_all(to_parent)?;
-
-					if delete_existing && to.exists() {
-						if to.is_dir() {
-							std::fs::remove_dir_all(&to)?;
-						} else {
-							std::fs::remove_file(&to)?;
-						}
-					}
+					run_commands(args.debug, step.owner.clone(), &[format!(
+						"mkdir -p {}",
+						to_parent.to_string_lossy()
+					)])?;
 				}
 
 				run_commands(args.debug, step.owner.clone(), &[format!(
@@ -688,23 +743,25 @@ fn _main() -> Result<()> {
 				)])?;
 			}
 			StepKind::RunCommand { command } => {
-				if args.debug {
-					println!("[D] RunCommand command={command}");
-				}
+				info!("[{}]: Running command '{}'", step.relative_path_str, &command);
 
 				run_commands(args.debug, step.owner.clone(), &[command])?;
 			}
 			StepKind::RunCommands { commands } => {
-				if args.debug {
-					println!("[D] RunCommands commands={commands:?}");
-				}
+				info!(
+					"[{}]: Running commands:\n{}",
+					step.relative_path_str,
+					commands.join("\n")
+				);
 
 				run_commands(args.debug, step.owner.clone(), &commands)?;
 			}
 			StepKind::RunScript { path } => {
-				if args.debug {
-					println!("[D] RunScript path={path:?}");
-				}
+				info!(
+					"[{}]: Running shell script '{}'",
+					step.relative_path_str,
+					path.to_string_lossy()
+				);
 
 				run_command_raw(
 					args.debug,
