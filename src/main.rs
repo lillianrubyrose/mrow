@@ -694,7 +694,7 @@ fn _main() -> Result<()> {
 		match step.kind {
 			StepKind::InstallPackage { package, aur } => {
 				info!(
-					"[{}]: Installing {}package: {}",
+					"[{}] Installing {}package: {}",
 					step.relative_path_str,
 					if aur { "AUR " } else { "" },
 					package
@@ -704,7 +704,7 @@ fn _main() -> Result<()> {
 			}
 			StepKind::InstallPackages { packages, aur } => {
 				info!(
-					"[{}]: Installing {}packages:\n{}",
+					"[{}] Installing {}packages:\n{}",
 					step.relative_path_str,
 					if aur { "AUR " } else { "" },
 					packages.join("\n")
@@ -714,7 +714,7 @@ fn _main() -> Result<()> {
 			}
 			StepKind::CopyFile { from, to, as_root } => {
 				info!(
-					"[{}]: Copying file '{}' to '{}'{}",
+					"[{}] Copying file '{}' to '{}'{}",
 					step.relative_path_str,
 					from.to_string_lossy(),
 					to.to_string_lossy(),
@@ -738,7 +738,7 @@ fn _main() -> Result<()> {
 				delete_existing,
 			} => {
 				info!(
-					"[{}]: Creating symlink from '{}' to '{}'{}",
+					"[{}] Creating symlink from '{}' to '{}'{}",
 					step.relative_path_str,
 					from.to_string_lossy(),
 					to.to_string_lossy(),
@@ -771,13 +771,13 @@ fn _main() -> Result<()> {
 				)?;
 			}
 			StepKind::RunCommand { command } => {
-				info!("[{}]: Running command '{}'", step.relative_path_str, &command);
+				info!("[{}] Running command '{}'", step.relative_path_str, &command);
 
 				run_commands(args.debug, &step.owner, &[command])?;
 			}
 			StepKind::RunCommands { commands } => {
 				info!(
-					"[{}]: Running commands:\n{}",
+					"[{}] Running commands:\n{}",
 					step.relative_path_str,
 					commands.join("\n")
 				);
@@ -786,7 +786,7 @@ fn _main() -> Result<()> {
 			}
 			StepKind::RunScript { path } => {
 				info!(
-					"[{}]: Running shell script '{}'",
+					"[{}] Running shell script '{}'",
 					step.relative_path_str,
 					path.to_string_lossy()
 				);
