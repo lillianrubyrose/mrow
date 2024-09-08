@@ -431,7 +431,10 @@ fn get_all_steps(root_dir: &Path, base: &MrowFile) -> Result<Vec<Step>> {
 		.iter()
 		.filter(|include| include.module.steps.is_empty() && include.module.includes.empty())
 		.for_each(|include| {
-			println!("[?] '{}' has no steps or includes.", include.path.to_string_lossy());
+			warn!(
+				"'{}' is a no-op since it contains no steps or includes.",
+				include.path.to_string_lossy()
+			);
 		});
 
 	let mut steps = base
@@ -636,10 +639,14 @@ fn _main() -> Result<()> {
 				)?;
 
 				info!("Cloning {name} repo into /opt/{name}");
-				run_commands(args.debug, &root.path, &[
-					format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
-					format!("sudo chown -R {username}: /opt/{name}"),
-				])?;
+				run_commands(
+					args.debug,
+					&root.path,
+					&[
+						format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
+						format!("sudo chown -R {username}: /opt/{name}"),
+					],
+				)?;
 
 				info!("Building and installing {name}");
 				run_command_raw(
@@ -687,12 +694,16 @@ fn _main() -> Result<()> {
 					if as_root { " as root" } else { "" }
 				);
 
-				run_commands(args.debug, &step.owner, &[format!(
-					"{}cp {} {}",
-					if as_root { "sudo " } else { "" },
-					from.to_string_lossy(),
-					to.to_string_lossy()
-				)])?;
+				run_commands(
+					args.debug,
+					&step.owner,
+					&[format!(
+						"{}cp {} {}",
+						if as_root { "sudo " } else { "" },
+						from.to_string_lossy(),
+						to.to_string_lossy()
+					)],
+				)?;
 			}
 			StepKind::Symlink {
 				from,
@@ -718,17 +729,18 @@ fn _main() -> Result<()> {
 
 				if to.exists() {
 					let to_parent = to.parent().unwrap_or_else(|| unreachable!());
-					run_commands(args.debug, &step.owner, &[format!(
-						"mkdir -p {}",
-						to_parent.to_string_lossy()
-					)])?;
+					run_commands(
+						args.debug,
+						&step.owner,
+						&[format!("mkdir -p {}", to_parent.to_string_lossy())],
+					)?;
 				}
 
-				run_commands(args.debug, &step.owner, &[format!(
-					"ln -s {} {}",
-					from.to_string_lossy(),
-					to.to_string_lossy()
-				)])?;
+				run_commands(
+					args.debug,
+					&step.owner,
+					&[format!("ln -s {} {}", from.to_string_lossy(), to.to_string_lossy())],
+				)?;
 			}
 			StepKind::RunCommand { command } => {
 				info!("[{}]: Running command '{}'", step.relative_path_str, &command);
