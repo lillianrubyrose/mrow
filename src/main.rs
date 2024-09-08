@@ -191,21 +191,34 @@ impl MrowFile {
 				PathBuf::from("mrow.toml")
 			} else {
 				let mut parts = vec![];
-				let mut parent = path.parent().unwrap_or_else(|| unreachable!());
+				let mut parent = path.parent().unwrap_or_else(|| {
+					unreachable!("the program doesn't allow for placing a mrow.toml file in the root of a filesystem")
+				});
 				while parent != root_dir {
-					parts.push(parent.file_name().unwrap_or_else(|| unreachable!()));
-					parent = parent.parent().unwrap_or_else(|| unreachable!());
+					parts.push(
+						parent
+							.file_name()
+							.unwrap_or_else(|| unreachable!("linux requires that directories have names")),
+					);
+					parent = parent.parent().unwrap_or_else(|| {
+						unreachable!(
+							"the program doesn't allow for placing a mrow.toml file in the root of a filesystem"
+						)
+					});
 				}
 
-				PathBuf::new()
-					.join(parts.into_iter().rev().collect::<PathBuf>())
-					.join(path.file_name().unwrap_or_else(|| unreachable!()))
+				PathBuf::new().join(parts.into_iter().rev().collect::<PathBuf>()).join(
+					path.file_name()
+						.unwrap_or_else(|| unreachable!("linux requires that directories have names")),
+				)
 			}
 		};
 
 		let dir = path
 			.parent()
-			.unwrap_or_else(|| unreachable!("Don't run in '/' you goober."))
+			.unwrap_or_else(|| {
+				unreachable!("the program doesn't allow for placing a mrow.toml file in the root of a filesystem")
+			})
 			.to_path_buf();
 		let path = path.canonicalize()?;
 
@@ -455,7 +468,7 @@ fn get_all_steps(root_dir: &Path, base: &MrowFile) -> Result<Vec<Step>> {
 }
 
 fn check_os_release() -> Result<()> {
-	let regex = Regex::new(r#"(\w+)="?([^"|^\n]+)"#).unwrap_or_else(|_| unreachable!("should never happen"));
+	let regex = Regex::new(r#"(\w+)="?([^"|^\n]+)"#).unwrap_or_else(|_| unreachable!("regex should always be valid"));
 
 	let mut is_arch = false;
 	for line in std::fs::read_to_string("/etc/os-release")?.lines() {
@@ -742,12 +755,13 @@ fn _main() -> Result<()> {
 				}
 
 				if to.exists() {
-					let to_parent = to.parent().unwrap_or_else(|| unreachable!());
-					run_commands(
-						args.debug,
-						&step.owner,
-						&[format!("mkdir -p {}", to_parent.to_string_lossy())],
-					)?;
+					if let Some(to_parent) = to.parent() {
+						run_commands(
+							args.debug,
+							&step.owner,
+							&[format!("mkdir -p {}", to_parent.to_string_lossy())],
+						)?;
+					}
 				}
 
 				run_commands(
@@ -782,7 +796,14 @@ fn _main() -> Result<()> {
 					&step.owner,
 					"sh",
 					&[&path.to_string_lossy().into_owned()],
-					&path.parent().unwrap_or_else(|| unreachable!()).to_string_lossy(),
+					&path
+						.parent()
+						.unwrap_or_else(|| {
+							unreachable!(
+								"the program doesn't allow for placing a mrow.toml file in the root of a filesystem"
+							)
+						})
+						.to_string_lossy(),
 				)?;
 			}
 		}
