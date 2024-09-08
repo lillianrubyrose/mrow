@@ -663,6 +663,20 @@ fn _main() -> Result<()> {
 		}
 	}
 
+	if aur_helper.is_none() {
+		for step in &all_steps {
+			if let StepKind::InstallPackage { package: _, aur: true }
+			| StepKind::InstallPackages { packages: _, aur: true } = step.kind
+			{
+				error!(
+					"An install package step in '{}' requires AUR but there is no AUR helper set in your mrow.toml",
+					step.relative_path_str
+				);
+				exit(-1);
+			}
+		}
+	}
+
 	for step in all_steps {
 		match step.kind {
 			StepKind::InstallPackage { package, aur } => {
