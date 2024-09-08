@@ -1,0 +1,2 @@
+[module]
+steps = [{ kind = "install-packages", packages = ["kitty", "fish"] }]

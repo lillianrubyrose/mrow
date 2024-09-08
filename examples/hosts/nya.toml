@@ -1,0 +1,3 @@
+[module]
+includes = ["../modules/minecraft.toml"]
+steps = ["sudo test"]

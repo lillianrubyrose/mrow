@@ -1,19 +1,16 @@
 [config]
 aur-helper = "yay"
+host-includes = [{ hostname = "nya", includes = ["./hosts/nya.toml"] }]
 
 [module]
+includes = "./modules/term.toml"
+
 steps = [
    { kind = "install-package", package = "firefox" },
    { kind = "install-package", package = "zed-preview-bin", aur = true },
 
    { kind = "install-packages", packages = [
-      "kitty",
-      "fish",
-   ] },
-
-   { kind = "install-packages", packages = [
       "vesktop",
-      "prismlauncher-qt5-bin",
    ], aur = true },
 
    [

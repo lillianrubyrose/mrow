@@ -44,7 +44,7 @@ enum Error {
 
 type Result<T> = miette::Result<T, Error>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum Includes {
 	None,
@@ -75,10 +75,19 @@ enum AurHelper {
 	Paru,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct HostInclude {
+	hostname: String,
+	#[serde(default)]
+	includes: Includes,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct RawConfigTable {
 	aur_helper: Option<AurHelper>,
+	#[serde(default)]
+	host_includes: Vec<HostInclude>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,9 +110,10 @@ impl RawMrowFile {
 	}
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone)]
 struct ConfigTable {
 	aur_helper: Option<AurHelper>,
+	host_includes: Vec<HostInclude>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,8 +196,9 @@ impl MrowFile {
 	}
 
 	fn new(root_dir: &Path, path: &Path) -> Result<MrowFile> {
+		let is_root = root_dir == PathBuf::new();
 		let relative_path = {
-			if root_dir == PathBuf::new() {
+			if is_root {
 				PathBuf::from("mrow.toml")
 			} else {
 				let mut parts = vec![];
@@ -195,11 +206,16 @@ impl MrowFile {
 					unreachable!("the program doesn't allow for placing a mrow.toml file in the root of a filesystem")
 				});
 				while parent != root_dir {
-					parts.push(
-						parent
-							.file_name()
-							.unwrap_or_else(|| unreachable!("linux requires that directories have names")),
-					);
+					if let Some(name) = parent.file_name() {
+						parts.push(name);
+					} else {
+						if parent.ends_with("..") {
+							parent = parent.parent().unwrap_or_else(|| {
+								unreachable!("the program doesn't allow for placing a mrow.toml file in the root of a filesystem")
+							});
+						}
+					}
+
 					parent = parent.parent().unwrap_or_else(|| {
 						unreachable!(
 							"the program doesn't allow for placing a mrow.toml file in the root of a filesystem"
@@ -223,9 +239,15 @@ impl MrowFile {
 		let path = path.canonicalize()?;
 
 		let raw = RawMrowFile::new(path.clone())?;
-		let config = raw
-			.config
-			.map(|RawConfigTable { aur_helper }| ConfigTable { aur_helper });
+		let config = raw.config.filter(|_| is_root).map(
+			|RawConfigTable {
+			     aur_helper,
+			     host_includes,
+			 }| ConfigTable {
+				aur_helper,
+				host_includes,
+			},
+		);
 
 		let module: ModuleTable = {
 			let mut steps = Vec::with_capacity(raw.module.steps.len());
@@ -419,8 +441,8 @@ struct Args {
 	debug: bool,
 }
 
-fn gather_includes(root_dir: &Path, file: &MrowFile) -> Result<Vec<MrowFile>> {
-	match &file.module.includes {
+fn gather_includes(root_dir: &Path, file: &MrowFile, includes: &Includes) -> Result<Vec<MrowFile>> {
+	match &includes {
 		Includes::None => vec![],
 		Includes::One(include) => vec![PathBuf::from(include)],
 		Includes::Many(includes) => includes.iter().map(PathBuf::from).collect(),
@@ -437,8 +459,13 @@ fn gather_includes(root_dir: &Path, file: &MrowFile) -> Result<Vec<MrowFile>> {
 	.collect()
 }
 
-fn get_all_steps(root_dir: &Path, base: &MrowFile) -> Result<Vec<Step>> {
-	let includes = gather_includes(root_dir, base)?;
+fn get_all_steps(root_dir: &Path, base: &MrowFile, host_includes: Option<Includes>) -> Result<Vec<Step>> {
+	let mut includes = match host_includes.map(|i| gather_includes(root_dir, base, &i)) {
+		Some(Ok(includes)) => includes,
+		Some(Err(err)) => Err(err)?,
+		None => vec![],
+	};
+	includes.extend(gather_includes(root_dir, base, &base.module.includes)?);
 
 	includes
 		.iter()
@@ -462,7 +489,7 @@ fn get_all_steps(root_dir: &Path, base: &MrowFile) -> Result<Vec<Step>> {
 		})
 		.collect::<Vec<_>>();
 	for include in includes {
-		steps.extend(get_all_steps(root_dir, &include)?);
+		steps.extend(get_all_steps(root_dir, &include, None)?);
 	}
 	Ok(steps)
 }
@@ -599,8 +626,18 @@ fn _main() -> Result<()> {
 	}
 
 	let root = MrowFile::new(&PathBuf::new(), &root_file)?;
-	let all_steps = get_all_steps(&root.dir, &root)?;
-	let aur_helper = root.config.and_then(|c| c.aur_helper);
+	let aur_helper = root.config.as_ref().and_then(|c| c.aur_helper);
+
+	let hostname = std::fs::read_to_string("/etc/hostname")?;
+	let all_steps = get_all_steps(
+		&root.dir,
+		&root,
+		root.config
+			.as_ref()
+			.map(|c| c.host_includes.clone())
+			.and_then(|i| i.into_iter().find(|i| &i.hostname == &hostname.trim()))
+			.map(|i| i.includes),
+	)?;
 
 	let username = std::env::var("USER")?;
 
