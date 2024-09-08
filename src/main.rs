@@ -32,7 +32,7 @@ enum Error {
 	InvalidStepGenericOwned(PathBuf, String),
 
 	#[error("Step in '{0}' failed. {1}")]
-	StepFailed(PathBuf, String),
+	StepFailed(String, String),
 
 	#[error("'{0}': {1}")]
 	Toml(PathBuf, toml::de::Error),
@@ -475,7 +475,7 @@ fn check_os_release() -> Result<()> {
 
 fn install_packages(
 	debug: bool,
-	owner: PathBuf,
+	owner: &Path,
 	packages: &[String],
 	aur_flag: bool,
 	aur_helper: Option<AurHelper>,
@@ -501,7 +501,7 @@ fn install_packages(
 		let cmd = cmd.output()?;
 		if !cmd.status.success() {
 			return Err(Error::StepFailed(
-				owner,
+				owner.to_string_lossy().into_owned(),
 				String::from_utf8_lossy(&cmd.stderr).into_owned(),
 			));
 		}
@@ -510,7 +510,7 @@ fn install_packages(
 	Ok(())
 }
 
-fn run_command_raw<S: AsRef<OsStr>>(debug: bool, owner: PathBuf, command: &str, args: &[S], dir: &str) -> Result<()> {
+fn run_command_raw<S: AsRef<OsStr>>(debug: bool, owner: &Path, command: &str, args: &[S], dir: &str) -> Result<()> {
 	let mut cmd = std::process::Command::new(command);
 	cmd.args(args).current_dir(dir);
 
@@ -520,7 +520,7 @@ fn run_command_raw<S: AsRef<OsStr>>(debug: bool, owner: PathBuf, command: &str, 
 		let cmd = cmd.output()?;
 		if !cmd.status.success() {
 			return Err(Error::StepFailed(
-				owner,
+				owner.to_string_lossy().into_owned(),
 				String::from_utf8_lossy(&cmd.stderr).into_owned(),
 			));
 		}
@@ -529,7 +529,7 @@ fn run_command_raw<S: AsRef<OsStr>>(debug: bool, owner: PathBuf, command: &str, 
 	Ok(())
 }
 
-fn run_command(debug: bool, owner: PathBuf, command: &str) -> Result<()> {
+fn run_command(debug: bool, owner: &Path, command: &str) -> Result<()> {
 	let command_and_args = command.split(' ').collect::<Vec<_>>();
 	let mut cmd = std::process::Command::new(command_and_args[0]);
 	cmd.args(&command_and_args[1..]);
@@ -540,7 +540,7 @@ fn run_command(debug: bool, owner: PathBuf, command: &str) -> Result<()> {
 		let cmd = cmd.output()?;
 		if !cmd.status.success() {
 			return Err(Error::StepFailed(
-				owner,
+				owner.to_string_lossy().into_owned(),
 				String::from_utf8_lossy(&cmd.stderr).into_owned(),
 			));
 		}
@@ -549,11 +549,11 @@ fn run_command(debug: bool, owner: PathBuf, command: &str) -> Result<()> {
 	Ok(())
 }
 
-fn run_commands(debug: bool, owner: PathBuf, commands: &[String]) -> Result<()> {
+fn run_commands(debug: bool, owner: &Path, commands: &[String]) -> Result<()> {
 	for command in commands {
 		let chained_commands = command.split("&&");
 		for command in chained_commands {
-			run_command(debug, owner.clone(), command.trim())?;
+			run_command(debug, owner, command.trim())?;
 		}
 	}
 
@@ -619,7 +619,7 @@ fn _main() -> Result<()> {
 			AurHelper::Paru => "paru-bin",
 		};
 
-		match run_command(args.debug, root.path.clone(), &format!("pacman -Qi {name}")) {
+		match run_command(args.debug, &root.path, &format!("pacman -Qi {name}")) {
 			Ok(()) => {
 				info!("AUR helper {name} is already installed, skipping install");
 			}
@@ -629,14 +629,14 @@ fn _main() -> Result<()> {
 				info!("Installing prerequisite packages (base-devel group and git)");
 				install_packages(
 					args.debug,
-					root.path.clone(),
+					&root.path,
 					&["base-devel".into(), "git".into()],
 					false,
 					None,
 				)?;
 
 				info!("Cloning {name} repo into /opt/{name}");
-				run_commands(args.debug, root.path.clone(), &[
+				run_commands(args.debug, &root.path, &[
 					format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
 					format!("sudo chown -R {username}: /opt/{name}"),
 				])?;
@@ -644,7 +644,7 @@ fn _main() -> Result<()> {
 				info!("Building and installing {name}");
 				run_command_raw(
 					args.debug,
-					root.path,
+					&root.path,
 					"makepkg",
 					&["-si", "--noconfirm"],
 					&format!("/opt/{name}"),
@@ -666,13 +666,7 @@ fn _main() -> Result<()> {
 					package
 				);
 
-				install_packages(
-					args.debug,
-					step.owner.clone(),
-					&[package],
-					aur,
-					aur_helper.filter(|_| aur),
-				)?;
+				install_packages(args.debug, &step.owner, &[package], aur, aur_helper.filter(|_| aur))?;
 			}
 			StepKind::InstallPackages { packages, aur } => {
 				info!(
@@ -682,13 +676,7 @@ fn _main() -> Result<()> {
 					packages.join("\n")
 				);
 
-				install_packages(
-					args.debug,
-					step.owner.clone(),
-					&packages,
-					aur,
-					aur_helper.filter(|_| aur),
-				)?;
+				install_packages(args.debug, &step.owner, &packages, aur, aur_helper.filter(|_| aur))?;
 			}
 			StepKind::CopyFile { from, to, as_root } => {
 				info!(
@@ -699,7 +687,7 @@ fn _main() -> Result<()> {
 					if as_root { " as root" } else { "" }
 				);
 
-				run_commands(args.debug, step.owner.clone(), &[format!(
+				run_commands(args.debug, &step.owner, &[format!(
 					"{}cp {} {}",
 					if as_root { "sudo " } else { "" },
 					from.to_string_lossy(),
@@ -730,13 +718,13 @@ fn _main() -> Result<()> {
 
 				if to.exists() {
 					let to_parent = to.parent().unwrap_or_else(|| unreachable!());
-					run_commands(args.debug, step.owner.clone(), &[format!(
+					run_commands(args.debug, &step.owner, &[format!(
 						"mkdir -p {}",
 						to_parent.to_string_lossy()
 					)])?;
 				}
 
-				run_commands(args.debug, step.owner.clone(), &[format!(
+				run_commands(args.debug, &step.owner, &[format!(
 					"ln -s {} {}",
 					from.to_string_lossy(),
 					to.to_string_lossy()
@@ -745,7 +733,7 @@ fn _main() -> Result<()> {
 			StepKind::RunCommand { command } => {
 				info!("[{}]: Running command '{}'", step.relative_path_str, &command);
 
-				run_commands(args.debug, step.owner.clone(), &[command])?;
+				run_commands(args.debug, &step.owner, &[command])?;
 			}
 			StepKind::RunCommands { commands } => {
 				info!(
@@ -754,7 +742,7 @@ fn _main() -> Result<()> {
 					commands.join("\n")
 				);
 
-				run_commands(args.debug, step.owner.clone(), &commands)?;
+				run_commands(args.debug, &step.owner, &commands)?;
 			}
 			StepKind::RunScript { path } => {
 				info!(
@@ -765,14 +753,10 @@ fn _main() -> Result<()> {
 
 				run_command_raw(
 					args.debug,
-					step.owner.clone(),
+					&step.owner,
 					"sh",
 					&[&path.to_string_lossy().into_owned()],
-					&path
-						.parent()
-						.unwrap_or_else(|| unreachable!())
-						.to_string_lossy()
-						.into_owned(),
+					&path.parent().unwrap_or_else(|| unreachable!()).to_string_lossy(),
 				)?;
 			}
 		}
