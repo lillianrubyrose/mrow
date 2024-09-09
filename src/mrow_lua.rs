@@ -1,6 +1,57 @@
-use crate::*;
+use mlua::{FromLua, Function, Value};
 
-fn get_function_caller_path(lua: &Lua, base_dir: &Path) -> mlua::Result<PathBuf> {
+use crate::{
+	collapse_path, resolve_path, AurHelper, LazyLock, Lua, Mutex, Path, PathBuf, Rc, Regex, Result, StdLib, Step,
+	StepKind,
+};
+
+impl<'lua> FromLua<'lua> for AurHelper {
+	fn from_lua(value: mlua::Value<'lua>, _lua: &'lua Lua) -> mlua::Result<Self> {
+		let Some(str) = value.as_str() else {
+			return Err(mlua::Error::FromLuaConversionError {
+				from: value.type_name(),
+				to: "AurHelper",
+				message: None,
+			});
+		};
+
+		Ok(match str {
+			"yay" => AurHelper::Yay,
+			"paru" => AurHelper::Paru,
+			v => {
+				return Err(mlua::Error::FromLuaConversionError {
+					from: value.type_name(),
+					to: "AurHelper",
+					message: Some(format!("Expected 'yay' or 'paru'. Got '{v}'")),
+				})
+			}
+		})
+	}
+}
+
+struct MrowRoot<'lua> {
+	init: Function<'lua>,
+	aur_helper: Option<AurHelper>,
+}
+
+impl<'lua> FromLua<'lua> for MrowRoot<'lua> {
+	fn from_lua(value: mlua::Value<'lua>, _lua: &'lua Lua) -> mlua::Result<Self> {
+		match value {
+			Value::Table(table) => {
+				let init = table.get("init")?;
+				let aur_helper = table.get("aur_helper")?;
+				Ok(Self { init, aur_helper })
+			}
+			_ => Err(mlua::Error::FromLuaConversionError {
+				from: value.type_name(),
+				to: "MrowRoot",
+				message: None,
+			}),
+		}
+	}
+}
+
+fn get_function_caller_path(lua: &Lua, base_dir: &Path, exec_single: &Rc<Option<PathBuf>>) -> mlua::Result<PathBuf> {
 	static TRACE_PATH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 		Regex::new(r"^(.+[/|\\].+.luau):\d+[.+]?$").unwrap_or_else(|_| unreachable!("regex should always be valid"))
 	});
@@ -22,13 +73,21 @@ fn get_function_caller_path(lua: &Lua, base_dir: &Path) -> mlua::Result<PathBuf>
 			let Some(path) = captures.get(1) else { unreachable!() };
 			PathBuf::from(path.as_str())
 		}
-		_ => base_dir.join("mrow.luau").clone(),
+		_ => (*exec_single)
+			.as_ref()
+			.clone()
+			.unwrap_or_else(|| base_dir.join("mrow.luau").clone()),
 	})
 }
 
-pub fn process(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec<Step>, Option<AurHelper>)> {
+pub fn process(
+	base_dir: PathBuf,
+	root_file: &Path,
+	exec_single: Option<PathBuf>,
+	hostname: &str,
+) -> Result<(Vec<Step>, Option<AurHelper>)> {
 	let steps: Rc<Mutex<Vec<Step>>> = Rc::default();
-	let aur_helper: Rc<Mutex<Option<AurHelper>>> = Rc::default();
+	let exec_single: Rc<Option<PathBuf>> = Rc::new(exec_single);
 
 	let lua = Lua::new();
 	lua.sandbox(true)?;
@@ -40,29 +99,15 @@ pub fn process(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(V
 	mrow_export.set("hostname", hostname)?;
 	mrow_export.set("base_dir", base_dir.to_string_lossy().trim())?;
 
-	{
-		let aur_helper = aur_helper.clone();
-		mrow_export.set(
-			"set_aur_helper",
-			lua.create_function(move |_, helper: String| {
-				*aur_helper.lock().unwrap() = Some(match helper.to_lowercase().as_str() {
-					"yay" => AurHelper::Yay,
-					"paru" => AurHelper::Paru,
-					v => panic!("Invalid AUR helper: {v}"),
-				});
-				Ok(())
-			})?,
-		)?;
-	}
-
 	// Install package
 	{
 		let base_dir = base_dir.clone();
 		let steps = steps.clone();
+		let exec_single = exec_single.clone();
 		mrow_export.set(
 			"install_package",
 			lua.create_function(move |lua, (package, aur): (String, Option<bool>)| {
-				let owner = get_function_caller_path(lua, &base_dir)?;
+				let owner = get_function_caller_path(lua, &base_dir, &exec_single)?;
 				let relative_path_str = collapse_path(&base_dir, &owner).to_string_lossy().into_owned();
 				let kind = StepKind::InstallPackage {
 					package,
@@ -85,10 +130,11 @@ pub fn process(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(V
 	{
 		let base_dir = base_dir.clone();
 		let steps = steps.clone();
+		let exec_single = exec_single.clone();
 		mrow_export.set(
 			"install_packages",
 			lua.create_function(move |lua, (packages, aur): (Vec<String>, Option<bool>)| {
-				let owner = get_function_caller_path(lua, &base_dir)?;
+				let owner = get_function_caller_path(lua, &base_dir, &exec_single)?;
 				let relative_path_str = collapse_path(&base_dir, &owner).to_string_lossy().into_owned();
 				let kind = StepKind::InstallPackages {
 					packages,
@@ -111,10 +157,11 @@ pub fn process(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(V
 	{
 		let base_dir = base_dir.clone();
 		let steps = steps.clone();
+		let exec_single = exec_single.clone();
 		mrow_export.set(
 			"copy_file",
 			lua.create_function(move |lua, (from, to, as_root): (String, String, Option<bool>)| {
-				let owner = get_function_caller_path(lua, &base_dir)?;
+				let owner = get_function_caller_path(lua, &base_dir, &exec_single)?;
 				let Some(parent) = owner.parent() else { unreachable!() };
 				let relative_path_str = collapse_path(&base_dir, &owner).to_string_lossy().into_owned();
 				let kind = StepKind::CopyFile {
@@ -139,11 +186,12 @@ pub fn process(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(V
 	{
 		let base_dir = base_dir.clone();
 		let steps = steps.clone();
+		let exec_single = exec_single.clone();
 		mrow_export.set(
 			"symlink",
 			lua.create_function(
 				move |lua, (from, to, delete_existing): (String, String, Option<bool>)| {
-					let owner = get_function_caller_path(lua, &base_dir)?;
+					let owner = get_function_caller_path(lua, &base_dir, &exec_single)?;
 					let Some(parent) = owner.parent() else { unreachable!() };
 					let relative_path_str = collapse_path(&base_dir, &owner).to_string_lossy().into_owned();
 					let kind = StepKind::Symlink {
@@ -169,10 +217,11 @@ pub fn process(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(V
 	{
 		let base_dir = base_dir.clone();
 		let steps = steps.clone();
+		let exec_single = exec_single.clone();
 		mrow_export.set(
 			"run_command",
 			lua.create_function(move |lua, command: String| {
-				let owner = get_function_caller_path(lua, &base_dir)?;
+				let owner = get_function_caller_path(lua, &base_dir, &exec_single)?;
 				let relative_path_str = collapse_path(&base_dir, &owner).to_string_lossy().into_owned();
 				let kind = StepKind::RunCommand { command };
 				steps
@@ -192,10 +241,11 @@ pub fn process(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(V
 	{
 		let base_dir = base_dir.clone();
 		let steps = steps.clone();
+		let exec_single = exec_single.clone();
 		mrow_export.set(
 			"run_commands",
 			lua.create_function(move |lua, commands: Vec<String>| {
-				let owner = get_function_caller_path(lua, &base_dir)?;
+				let owner = get_function_caller_path(lua, &base_dir, &exec_single)?;
 				let relative_path_str = collapse_path(&base_dir, &owner).to_string_lossy().into_owned();
 				let kind = StepKind::RunCommands { commands };
 				steps
@@ -215,10 +265,11 @@ pub fn process(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(V
 	{
 		let base_dir = base_dir.clone();
 		let steps = steps.clone();
+		let exec_single = exec_single.clone();
 		mrow_export.set(
 			"run_script",
 			lua.create_function(move |lua, path: String| {
-				let owner = get_function_caller_path(lua, &base_dir)?;
+				let owner = get_function_caller_path(lua, &base_dir, &exec_single)?;
 				let relative_path_str = collapse_path(&base_dir, &owner).to_string_lossy().into_owned();
 				let kind = StepKind::RunScript {
 					path: resolve_path(&path, &base_dir),
@@ -239,27 +290,30 @@ pub fn process(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(V
 	lua.globals().set("mrow", mrow_export)?;
 	lua.globals()
 		.set("_require", lua.globals().raw_get::<_, mlua::Function>("require")?)?;
-	lua.globals().set(
-		"require",
-		lua.create_function(move |lua, relative_path: String| {
-			let path = if let Some(relative_path) = relative_path.strip_prefix("@/") {
-				base_dir.join(relative_path)
-			} else {
-				get_function_caller_path(lua, &base_dir)?
-					.parent()
-					.unwrap_or_else(|| {
-						unreachable!(
-							"the program doesn't allow for placing a mrow.luau file in the root of a filesystem"
-						)
-					})
-					.to_path_buf()
-					.join(relative_path)
-			};
+	{
+		let exec_single = exec_single.clone();
+		lua.globals().set(
+			"require",
+			lua.create_function(move |lua, relative_path: String| {
+				let path = if let Some(path) = relative_path.strip_prefix("@/") {
+					base_dir.join(path)
+				} else {
+					get_function_caller_path(lua, &base_dir, &exec_single)?
+						.parent()
+						.unwrap_or_else(|| {
+							unreachable!(
+								"the program doesn't allow for placing a mrow.luau file in the root of a filesystem"
+							)
+						})
+						.to_path_buf()
+						.join(relative_path)
+				};
 
-			lua.load(format!(r#"_require("{}")"#, path.to_string_lossy()))
-				.eval::<mlua::Value>()
-		})?,
-	)?;
+				lua.load(format!(r#"_require("{}")"#, path.to_string_lossy()))
+					.eval::<mlua::Value>()
+			})?,
+		)?;
+	}
 
 	let create_log_fn = |level: log::Level| {
 		lua.create_function(move |_, message: String| {
@@ -272,10 +326,13 @@ pub fn process(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(V
 	lua.globals().set("log_debug", create_log_fn(log::Level::Debug)?)?;
 	lua.globals().set("log_error", create_log_fn(log::Level::Error)?)?;
 
-	let script = lua.load(std::fs::read_to_string(root_file)?);
-	script.eval::<()>()?;
+	let root = lua.load(std::fs::read_to_string(root_file)?).eval::<MrowRoot>()?;
+	if let Some(ref exec_single) = *exec_single {
+		lua.load(std::fs::read_to_string(exec_single)?).eval::<()>()?;
+	} else {
+		root.init.call::<_, ()>(())?;
+	}
 
 	let steps = std::mem::take(&mut *steps.lock().unwrap());
-	let aur_helper = (*aur_helper.lock().unwrap()).take();
-	Ok((steps, aur_helper))
+	Ok((steps, root.aur_helper))
 }

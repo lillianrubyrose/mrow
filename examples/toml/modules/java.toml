@@ -1,0 +1,8 @@
+[module]
+steps = [
+   { kind = "install-packages", packages = [
+      "jdk8-openjdk",
+      "jdk17-openjdk",
+      "jdk21-openjdk",
+   ] },
+]

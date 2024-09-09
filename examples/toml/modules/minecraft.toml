@@ -1,9 +1,5 @@
 [module]
+includes = "java.toml"
 steps = [
-   { kind = "install-packages", packages = [
-      "jdk8-openjdk",
-      "jdk17-openjdk",
-      "jdk21-openjdk",
-   ] },
    { kind = "install-package", package = "prismlauncher-qt5-bin", aur = true },
 ]

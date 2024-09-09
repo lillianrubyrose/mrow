@@ -1,4 +1,6 @@
-use crate::*;
+use crate::{
+	collapse_path, resolve_path, warn, AurHelper, Deserialize, Error, Path, PathBuf, Result, Step, StepKind, Value,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -339,19 +341,27 @@ fn get_all_steps(root_dir: &Path, base: &MrowFile, host_includes: Option<Include
 	Ok(steps)
 }
 
-pub fn process(base_dir: &Path, root_file: &Path, hostname: &str) -> Result<(Vec<Step>, Option<AurHelper>)> {
+pub fn process(
+	base_dir: &Path,
+	root_file: &Path,
+	exec_single: Option<PathBuf>,
+	hostname: &str,
+) -> Result<(Vec<Step>, Option<AurHelper>)> {
 	let root = MrowFile::new(base_dir, root_file)?;
 	let aur_helper = root.config.as_ref().and_then(|c| c.aur_helper);
 
-	let all_steps = get_all_steps(
-		&root.dir,
-		&root,
-		root.config
-			.as_ref()
-			.map(|c| c.host_includes.clone())
-			.and_then(|i| i.into_iter().find(|i| i.hostname == hostname))
-			.map(|i| i.includes),
-	)?;
+	let all_steps = match exec_single {
+		Some(exec_single) => get_all_steps(&root.dir, &MrowFile::new(base_dir, &exec_single)?, None)?,
+		None => get_all_steps(
+			&root.dir,
+			&root,
+			root.config
+				.as_ref()
+				.map(|c| c.host_includes.clone())
+				.and_then(|i| i.into_iter().find(|i| i.hostname == hostname))
+				.map(|i| i.includes),
+		)?,
+	};
 
 	Ok((all_steps, aur_helper))
 }

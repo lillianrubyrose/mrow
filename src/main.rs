@@ -101,6 +101,10 @@ struct Args {
 	#[arg(short, long)]
 	dir: Option<String>,
 
+	/// Only execute this module
+	#[arg(long)]
+	single_module: Option<PathBuf>,
+
 	/// Doesn't execute any commands, just logs them and what they would do.
 	#[arg(long)]
 	debug: bool,
@@ -142,9 +146,11 @@ fn collapse_path(base_dir: &Path, path: &Path) -> PathBuf {
 			});
 		}
 
-		parent = parent.parent().unwrap_or_else(|| {
-			unreachable!("the program doesn't allow for placing a mrow.toml file in the root of a filesystem")
-		});
+		if let Some(next_parent) = parent.parent() {
+			parent = next_parent;
+		} else {
+			return path.to_path_buf();
+		}
 	}
 
 	PathBuf::new().join(parts.into_iter().rev().collect::<PathBuf>()).join(
@@ -309,9 +315,9 @@ fn _main() -> Result<()> {
 	let hostname = std::fs::read_to_string("/etc/hostname")?;
 	let hostname = hostname.trim();
 	let (all_steps, aur_helper) = if lua {
-		mrow_lua::process(base_dir, &root_file, hostname)?
+		mrow_lua::process(base_dir, &root_file, args.single_module, hostname)?
 	} else {
-		mrow_toml::process(&base_dir, &root_file, hostname)?
+		mrow_toml::process(&base_dir, &root_file, args.single_module, hostname)?
 	};
 
 	if !args.debug {
@@ -347,14 +353,10 @@ fn _main() -> Result<()> {
 				)?;
 
 				info!("Cloning {name} repo into /opt/{name}");
-				run_commands(
-					args.debug,
-					&root_file,
-					&[
-						format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
-						format!("sudo chown -R {username}: /opt/{name}"),
-					],
-				)?;
+				run_commands(args.debug, &root_file, &[
+					format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
+					format!("sudo chown -R {username}: /opt/{name}"),
+				])?;
 
 				info!("Building and installing {name}");
 				run_command_raw(
@@ -416,16 +418,12 @@ fn _main() -> Result<()> {
 					if as_root { " as root" } else { "" }
 				);
 
-				run_commands(
-					args.debug,
-					&step.owner,
-					&[format!(
-						"{}cp {} {}",
-						if as_root { "sudo " } else { "" },
-						from.to_string_lossy(),
-						to.to_string_lossy()
-					)],
-				)?;
+				run_commands(args.debug, &step.owner, &[format!(
+					"{}cp {} {}",
+					if as_root { "sudo " } else { "" },
+					from.to_string_lossy(),
+					to.to_string_lossy()
+				)])?;
 			}
 			StepKind::Symlink {
 				from,
@@ -451,19 +449,18 @@ fn _main() -> Result<()> {
 
 				if to.exists() {
 					if let Some(to_parent) = to.parent() {
-						run_commands(
-							args.debug,
-							&step.owner,
-							&[format!("mkdir -p {}", to_parent.to_string_lossy())],
-						)?;
+						run_commands(args.debug, &step.owner, &[format!(
+							"mkdir -p {}",
+							to_parent.to_string_lossy()
+						)])?;
 					}
 				}
 
-				run_commands(
-					args.debug,
-					&step.owner,
-					&[format!("ln -s {} {}", from.to_string_lossy(), to.to_string_lossy())],
-				)?;
+				run_commands(args.debug, &step.owner, &[format!(
+					"ln -s {} {}",
+					from.to_string_lossy(),
+					to.to_string_lossy()
+				)])?;
 			}
 			StepKind::RunCommand { command } => {
 				info!("[{}] Running command '{}'", step.relative_path_str, &command);

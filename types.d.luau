@@ -1,6 +1,7 @@
 -- Types definition file for LuaU. Useful to load in luau-lsp
 
-type AurHelper = "yay" | "paru"
+export type AurHelper = "yay" | "paru"
+export type MrowRoot = { init: () -> (), aur_helper: AurHelper? }
 
 declare mrow: {
    hostname: string,
