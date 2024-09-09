@@ -2,13 +2,12 @@
 #![allow(clippy::too_many_lines)]
 
 use std::{
-	borrow::BorrowMut,
 	env::VarError,
 	ffi::OsStr,
 	path::{Path, PathBuf},
 	process::exit,
 	rc::Rc,
-	sync::{Arc, LazyLock, Mutex},
+	sync::{LazyLock, Mutex},
 };
 
 use clap::Parser;
@@ -209,14 +208,10 @@ impl MrowFile {
 		while parent != base_dir {
 			if let Some(name) = parent.file_name() {
 				parts.push(name);
-			} else {
-				if parent.ends_with("..") {
-					parent = parent.parent().unwrap_or_else(|| {
-						unreachable!(
-							"the program doesn't allow for placing a mrow.toml file in the root of a filesystem"
-						)
-					});
-				}
+			} else if parent.ends_with("..") {
+				parent = parent.parent().unwrap_or_else(|| {
+					unreachable!("the program doesn't allow for placing a mrow.toml file in the root of a filesystem")
+				});
 			}
 
 			parent = parent.parent().unwrap_or_else(|| {
@@ -608,7 +603,7 @@ fn run_commands(debug: bool, owner: &Path, commands: &[String]) -> Result<()> {
 
 fn lua_get_caller_path(lua: &Lua, base_dir: &Path) -> mlua::Result<PathBuf> {
 	static TRACE_PATH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-		Regex::new(r#"^(.+[/|\\].+.luau):\d+[.+]?$"#).unwrap_or_else(|_| unreachable!("regex should always be valid"))
+		Regex::new(r"^(.+[/|\\].+.luau):\d+[.+]?$").unwrap_or_else(|_| unreachable!("regex should always be valid"))
 	});
 
 	// debug.traceback gives something like:
@@ -622,21 +617,14 @@ fn lua_get_caller_path(lua: &Lua, base_dir: &Path) -> mlua::Result<PathBuf> {
 	// [string "src/main.rs:704:22"]:1
 	//
 	// The first instance of a valid path is the caller. If there is none, assume root.
-	let trace = lua.load(r#"debug.traceback(nil, nil)"#).eval::<String>()?;
-	Ok(
-		match trace
-			.lines()
-			.map(|l| TRACE_PATH_REGEX.captures(l))
-			.filter(Option::is_some)
-			.next()
-		{
-			Some(Some(captures)) => {
-				let Some(path) = captures.get(1) else { unreachable!() };
-				PathBuf::from(path.as_str())
-			}
-			_ => base_dir.join("mrow.luau").to_path_buf(),
-		},
-	)
+	let trace = lua.load(r"debug.traceback(nil, nil)").eval::<String>()?;
+	Ok(match trace.lines().find_map(|l| TRACE_PATH_REGEX.captures(l)) {
+		Some(captures) => {
+			let Some(path) = captures.get(1) else { unreachable!() };
+			PathBuf::from(path.as_str())
+		}
+		_ => base_dir.join("mrow.luau").clone(),
+	})
 }
 
 fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec<Step>, Option<AurHelper>)> {
@@ -646,7 +634,7 @@ fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec
 	let lua = Lua::new();
 	lua.sandbox(true)?;
 	lua.load_from_std_lib(StdLib::ALL)?;
-	lua.load(r#"function install_package(package: string, aur: boolean) mrow.install_package(package, aur) end"#)
+	lua.load(r"function install_package(package: string, aur: boolean) mrow.install_package(package, aur) end")
 		.eval::<()>()?;
 
 	let mrow_export = lua.create_table()?;
@@ -657,7 +645,7 @@ fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec
 		let aur_helper = aur_helper.clone();
 		mrow_export.set(
 			"set_aur_helper",
-			lua.create_function(move |_, (helper): (String)| {
+			lua.create_function(move |_, helper: String| {
 				*aur_helper.lock().unwrap() = Some(match helper.to_lowercase().as_str() {
 					"yay" => AurHelper::Yay,
 					"paru" => AurHelper::Paru,
@@ -737,8 +725,8 @@ fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec
 					.to_string_lossy()
 					.into_owned();
 				let kind = StepKind::CopyFile {
-					from: MrowFile::resolve_path(&from, &parent),
-					to: MrowFile::resolve_path(&to, &parent),
+					from: MrowFile::resolve_path(&from, parent),
+					to: MrowFile::resolve_path(&to, parent),
 					as_root: as_root.unwrap_or_default(),
 				};
 				steps
@@ -768,8 +756,8 @@ fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec
 						.to_string_lossy()
 						.into_owned();
 					let kind = StepKind::Symlink {
-						from: MrowFile::resolve_path(&from, &parent),
-						to: MrowFile::resolve_path(&to, &parent),
+						from: MrowFile::resolve_path(&from, parent),
+						to: MrowFile::resolve_path(&to, parent),
 						delete_existing: delete_existing.unwrap_or_default(),
 					};
 					steps
@@ -792,7 +780,7 @@ fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec
 		let steps = steps.clone();
 		mrow_export.set(
 			"run_command",
-			lua.create_function(move |lua, (command): (String)| {
+			lua.create_function(move |lua, command: String| {
 				let owner = lua_get_caller_path(lua, &base_dir)?;
 				let relative_path_str = MrowFile::collapse_path(&base_dir, &owner)
 					.to_string_lossy()
@@ -817,7 +805,7 @@ fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec
 		let steps = steps.clone();
 		mrow_export.set(
 			"run_commands",
-			lua.create_function(move |lua, (commands): (Vec<String>)| {
+			lua.create_function(move |lua, commands: Vec<String>| {
 				let owner = lua_get_caller_path(lua, &base_dir)?;
 				let relative_path_str = MrowFile::collapse_path(&base_dir, &owner)
 					.to_string_lossy()
@@ -842,7 +830,7 @@ fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec
 		let steps = steps.clone();
 		mrow_export.set(
 			"run_script",
-			lua.create_function(move |lua, (path): (String)| {
+			lua.create_function(move |lua, path: String| {
 				let owner = lua_get_caller_path(lua, &base_dir)?;
 				let relative_path_str = MrowFile::collapse_path(&base_dir, &owner)
 					.to_string_lossy()
@@ -864,25 +852,29 @@ fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec
 	}
 
 	lua.globals().set("mrow", mrow_export)?;
-	lua.globals().set("_require", lua.globals().raw_get::<_, mlua::Function>("require")?)?;
-	lua.globals().set("require", lua.create_function(move |lua, relative_path: String| {
-		let path = if relative_path.starts_with("@/") {
-			let relative_path = &relative_path[2..];
-			base_dir.join(relative_path)
-		} else {
-			lua_get_caller_path(lua, &base_dir)?
-				.parent()
-				.unwrap_or_else(|| {
-					unreachable!("the program doesn't allow for placing a mrow.luau file in the root of a filesystem")
-				})
-				.to_path_buf()
-				.join(relative_path)
-		};
+	lua.globals()
+		.set("_require", lua.globals().raw_get::<_, mlua::Function>("require")?)?;
+	lua.globals().set(
+		"require",
+		lua.create_function(move |lua, relative_path: String| {
+			let path = if let Some(relative_path) = relative_path.strip_prefix("@/") {
+				base_dir.join(relative_path)
+			} else {
+				lua_get_caller_path(lua, &base_dir)?
+					.parent()
+					.unwrap_or_else(|| {
+						unreachable!(
+							"the program doesn't allow for placing a mrow.luau file in the root of a filesystem"
+						)
+					})
+					.to_path_buf()
+					.join(relative_path)
+			};
 
-		Ok(lua
-			.load(format!(r#"_require("{}")"#, path.to_string_lossy()))
-			.eval::<mlua::Value>()?)
-	})?)?;
+			lua.load(format!(r#"_require("{}")"#, path.to_string_lossy()))
+				.eval::<mlua::Value>()
+		})?,
+	)?;
 
 	let create_log_fn = |level: log::Level| {
 		lua.create_function(move |_, message: String| {
@@ -898,13 +890,13 @@ fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec
 	let script = lua.load(std::fs::read_to_string(root_file)?);
 	script.eval::<()>()?;
 
-	let steps = std::mem::replace(&mut *steps.lock().unwrap(), vec![]);
-	let aur_helper = std::mem::replace(&mut *aur_helper.lock().unwrap(), None);
+	let steps = std::mem::take(&mut *steps.lock().unwrap());
+	let aur_helper = (*aur_helper.lock().unwrap()).take();
 	Ok((steps, aur_helper))
 }
 
-fn _main_toml(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec<Step>, Option<AurHelper>)> {
-	let root = MrowFile::new(&base_dir, &root_file)?;
+fn _main_toml(base_dir: &Path, root_file: &Path, hostname: &str) -> Result<(Vec<Step>, Option<AurHelper>)> {
+	let root = MrowFile::new(base_dir, root_file)?;
 	let aur_helper = root.config.as_ref().and_then(|c| c.aur_helper);
 
 	let all_steps = get_all_steps(
@@ -913,7 +905,7 @@ fn _main_toml(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Ve
 		root.config
 			.as_ref()
 			.map(|c| c.host_includes.clone())
-			.and_then(|i| i.into_iter().find(|i| &i.hostname == &hostname.trim()))
+			.and_then(|i| i.into_iter().find(|i| i.hostname == hostname))
 			.map(|i| i.includes),
 	)?;
 
@@ -969,7 +961,7 @@ fn _main() -> Result<()> {
 	let (all_steps, aur_helper) = if lua {
 		_main_lua(base_dir, &root_file, hostname)?
 	} else {
-		_main_toml(base_dir, &root_file, hostname)?
+		_main_toml(&base_dir, &root_file, hostname)?
 	};
 
 	if !args.debug {
@@ -1005,14 +997,10 @@ fn _main() -> Result<()> {
 				)?;
 
 				info!("Cloning {name} repo into /opt/{name}");
-				run_commands(
-					args.debug,
-					&root_file,
-					&[
-						format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
-						format!("sudo chown -R {username}: /opt/{name}"),
-					],
-				)?;
+				run_commands(args.debug, &root_file, &[
+					format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
+					format!("sudo chown -R {username}: /opt/{name}"),
+				])?;
 
 				info!("Building and installing {name}");
 				run_command_raw(
@@ -1074,16 +1062,12 @@ fn _main() -> Result<()> {
 					if as_root { " as root" } else { "" }
 				);
 
-				run_commands(
-					args.debug,
-					&step.owner,
-					&[format!(
-						"{}cp {} {}",
-						if as_root { "sudo " } else { "" },
-						from.to_string_lossy(),
-						to.to_string_lossy()
-					)],
-				)?;
+				run_commands(args.debug, &step.owner, &[format!(
+					"{}cp {} {}",
+					if as_root { "sudo " } else { "" },
+					from.to_string_lossy(),
+					to.to_string_lossy()
+				)])?;
 			}
 			StepKind::Symlink {
 				from,
@@ -1109,19 +1093,18 @@ fn _main() -> Result<()> {
 
 				if to.exists() {
 					if let Some(to_parent) = to.parent() {
-						run_commands(
-							args.debug,
-							&step.owner,
-							&[format!("mkdir -p {}", to_parent.to_string_lossy())],
-						)?;
+						run_commands(args.debug, &step.owner, &[format!(
+							"mkdir -p {}",
+							to_parent.to_string_lossy()
+						)])?;
 					}
 				}
 
-				run_commands(
-					args.debug,
-					&step.owner,
-					&[format!("ln -s {} {}", from.to_string_lossy(), to.to_string_lossy())],
-				)?;
+				run_commands(args.debug, &step.owner, &[format!(
+					"ln -s {} {}",
+					from.to_string_lossy(),
+					to.to_string_lossy()
+				)])?;
 			}
 			StepKind::RunCommand { command } => {
 				info!("[{}] Running command '{}'", step.relative_path_str, &command);
