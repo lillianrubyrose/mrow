@@ -97,7 +97,7 @@ enum StepKind {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-	/// The directory where your 'mrow.toml' resides. Defaults to CWD
+	/// The directory where your 'mrow.{toml,luau}' resides. Defaults to CWD
 	#[arg(short, long)]
 	dir: Option<String>,
 
