@@ -270,9 +270,10 @@ pub fn process(
 			"run_script",
 			lua.create_function(move |lua, path: String| {
 				let owner = get_function_caller_path(lua, &base_dir, &exec_single)?;
+				let Some(parent) = owner.parent() else { unreachable!() };
 				let relative_path_str = collapse_path(&base_dir, &owner).to_string_lossy().into_owned();
 				let kind = StepKind::RunScript {
-					path: resolve_path(&path, &base_dir),
+					path: resolve_path(&path, &parent),
 				};
 				steps
 					.lock()
