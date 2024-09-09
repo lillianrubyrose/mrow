@@ -1,6 +1,6 @@
-# Mrow
+# mrow
 
-Mrow is a tool designed specifically for Arch Linux to automate various system configuration and software installation steps. This tool reads from a `mrow.toml` file and executes a series of steps defined within the file.
+mrow is a tool for automating tasks on Arch Linux systems after OS installation.
 
 ## Prerequisites
 
@@ -23,105 +23,31 @@ Mrow is a tool designed specifically for Arch Linux to automate various system c
 
 3. **Run the Binary**
    ```sh
-   ./target/release/mrow --dir <directory_with_toml>
+   ./target/release/mrow --dir <path>
    ```
 
-## Usage
+### Github Release
+[Latest Download](https://github.com/lillianrubyrose/mrow/releases/latest)
 
-1. **Create a `mrow.toml` File**
+## CLI Usage
+```sh
+mrow --dir <path>
+```
 
-   Here's an example `mrow.toml`:
+Arguments:
+- `--dir <path>` (Optional): Directory where your `mrow.{toml,luau}` resides. Defaults to current working directory.
+- `--debug` (Optional): Doesn't execute any commands, just logs them and what they would do.
+- `--single-module <path>` (Optional): Executes only this module and no other steps.
 
-   ```toml
-   [config]
-   aur_helper = "yay"  # or "paru"
+## Getting Started
 
-   [module]
-   includes = ["include1.toml", "include2.toml"]
+You can view the [LuaU usage here](./README-LUA.md) or the [TOML usage here](./README-TOML.md).
 
-   [[module.steps]]
-   kind = "install-package"
-   package = "vim"
-   aur = false
-
-   [[module.steps]]
-   kind = "run-command"
-   command = "echo Hello, World!"
-   ```
-
-2. **Run Mrow**
-
-   ```sh
-   mrow --dir <directory_with_mrow_toml>
-   ```
-
-   Arguments:
-   - `--dir` (Optional): Directory where your `mrow.toml` resides. Defaults to current working directory.
-   - `--debug` (Optional): Doesn't execute any commands, just logs them and what they would do.
+You can also view [my personal mrowfiles](https://github.com/lillianrubyrose/mrowfiles) as an example.
 
 ## Contribution
 
 Feel free to fork this repository and create pull requests. If you find any issues or have feature requests, please [open an issue](https://github.com/lillianrubyrose/mrow/issues/new).
-
-### Examples
-
-[My personal mrowfiles for my system](https://github.com/lillianrubyrose/mrowfiles)
-
-#### Step Types
-
-1. **Install Package**
-
-   ```toml
-   [[module.steps]]
-   kind = "install-package"
-   package = "vim"
-   aur = false # optional, defaults to false
-   ```
-
-2. **Install Multiple Packages**
-
-   ```toml
-   [[module.steps]]
-   kind = "install-packages"
-   packages = ["vim", "htop"]
-   aur = false # optional, defaults to false
-   ```
-
-3. **Copy File**
-
-   ```toml
-   [[module.steps]]
-   kind = "copy-file"
-   from = "/path/to/source"
-   to = "/path/to/destination"
-   as-root = true # optional, defaults to false
-   ```
-
-4. **Create Symlink**
-
-   ```toml
-   [[module.steps]]
-   kind = "symlink"
-   from = "/path/to/source"
-   to = "/path/to/symlink"
-   delete-existing = true # optional, defaults to false
-   ```
-
-5. **Run Command**
-
-   ```toml
-   [[module.steps]]
-   kind = "run-command"
-   command = "echo Hello, World!"
-   ```
-
-6. **Run Script**
-
-   ```toml
-   [[module.steps]]
-   kind = "run-script"
-   path = "/path/to/script.sh"
-   ```
 
 ## License
 
