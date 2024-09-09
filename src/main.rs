@@ -2,15 +2,19 @@
 #![allow(clippy::too_many_lines)]
 
 use std::{
+	borrow::BorrowMut,
 	env::VarError,
 	ffi::OsStr,
 	path::{Path, PathBuf},
 	process::exit,
+	rc::Rc,
+	sync::{Arc, LazyLock, Mutex},
 };
 
 use clap::Parser;
 use log::{debug, error, info, warn};
 use miette::IntoDiagnostic;
+use mlua::{Lua, StdLib};
 use regex::Regex;
 use serde::Deserialize;
 use thiserror::Error;
@@ -40,6 +44,8 @@ enum Error {
 	Io(#[from] std::io::Error),
 	#[error(transparent)]
 	Var(#[from] VarError),
+	#[error(transparent)]
+	Lua(#[from] mlua::Error),
 }
 
 type Result<T> = miette::Result<T, Error>;
@@ -195,40 +201,37 @@ impl MrowFile {
 		resolved_path
 	}
 
-	fn new(root_dir: &Path, path: &Path) -> Result<MrowFile> {
-		let is_root = root_dir == PathBuf::new();
-		let relative_path = {
-			if is_root {
-				PathBuf::from("mrow.toml")
+	fn collapse_path(base_dir: &Path, path: &Path) -> PathBuf {
+		let mut parts = vec![];
+		let mut parent = path.parent().unwrap_or_else(|| {
+			unreachable!("the program doesn't allow for placing a mrow.toml file in the root of a filesystem")
+		});
+		while parent != base_dir {
+			if let Some(name) = parent.file_name() {
+				parts.push(name);
 			} else {
-				let mut parts = vec![];
-				let mut parent = path.parent().unwrap_or_else(|| {
-					unreachable!("the program doesn't allow for placing a mrow.toml file in the root of a filesystem")
-				});
-				while parent != root_dir {
-					if let Some(name) = parent.file_name() {
-						parts.push(name);
-					} else {
-						if parent.ends_with("..") {
-							parent = parent.parent().unwrap_or_else(|| {
-								unreachable!("the program doesn't allow for placing a mrow.toml file in the root of a filesystem")
-							});
-						}
-					}
-
+				if parent.ends_with("..") {
 					parent = parent.parent().unwrap_or_else(|| {
 						unreachable!(
 							"the program doesn't allow for placing a mrow.toml file in the root of a filesystem"
 						)
 					});
 				}
-
-				PathBuf::new().join(parts.into_iter().rev().collect::<PathBuf>()).join(
-					path.file_name()
-						.unwrap_or_else(|| unreachable!("linux requires that directories have names")),
-				)
 			}
-		};
+
+			parent = parent.parent().unwrap_or_else(|| {
+				unreachable!("the program doesn't allow for placing a mrow.toml file in the root of a filesystem")
+			});
+		}
+
+		PathBuf::new().join(parts.into_iter().rev().collect::<PathBuf>()).join(
+			path.file_name()
+				.unwrap_or_else(|| unreachable!("linux requires that directories have names")),
+		)
+	}
+
+	fn new(root_dir: &Path, path: &Path) -> Result<MrowFile> {
+		let relative_path = Self::collapse_path(root_dir, path);
 
 		let dir = path
 			.parent()
@@ -239,7 +242,7 @@ impl MrowFile {
 		let path = path.canonicalize()?;
 
 		let raw = RawMrowFile::new(path.clone())?;
-		let config = raw.config.filter(|_| is_root).map(
+		let config = raw.config.filter(|_| relative_path == PathBuf::from("mrow.toml")).map(
 			|RawConfigTable {
 			     aur_helper,
 			     host_includes,
@@ -603,32 +606,307 @@ fn run_commands(debug: bool, owner: &Path, commands: &[String]) -> Result<()> {
 	Ok(())
 }
 
-fn _main() -> Result<()> {
-	colog::default_builder().filter_level(log::LevelFilter::Debug).init();
+fn lua_get_caller_path(lua: &Lua, base_dir: &Path) -> mlua::Result<PathBuf> {
+	static TRACE_PATH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+		Regex::new(r#"^(.+[/|\\].+.luau):\d+[.+]?$"#).unwrap_or_else(|_| unreachable!("regex should always be valid"))
+	});
 
-	check_os_release()?;
+	// debug.traceback gives something like:
+	//
+	// [string "src/main.rs:611:9"]:1
+	// [string "src/main.rs:636:9"]:1 function install_package
+	// /home/lily/Dev/projects/mrow/examples/lua/modules/term.luau:1
+	// [string "src/main.rs:683:14"]:1
+	// /home/lily/Dev/projects/mrow/examples/lua/hosts/nya.luau:3
+	// [string "src/main.rs:683:14"]:1
+	// [string "src/main.rs:704:22"]:1
+	//
+	// The first instance of a valid path is the caller. If there is none, assume root.
+	let trace = lua.load(r#"debug.traceback(nil, nil)"#).eval::<String>()?;
+	Ok(
+		match trace
+			.lines()
+			.map(|l| TRACE_PATH_REGEX.captures(l))
+			.filter(Option::is_some)
+			.next()
+		{
+			Some(Some(captures)) => {
+				let Some(path) = captures.get(1) else { unreachable!() };
+				PathBuf::from(path.as_str())
+			}
+			_ => base_dir.join("mrow.luau").to_path_buf(),
+		},
+	)
+}
 
-	let args = Args::parse();
-	let base_dir = match args.dir {
-		Some(dir) => PathBuf::from(dir).canonicalize()?,
-		None => std::env::current_dir()?,
+fn _main_lua(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec<Step>, Option<AurHelper>)> {
+	let steps: Rc<Mutex<Vec<Step>>> = Rc::default();
+	let aur_helper: Rc<Mutex<Option<AurHelper>>> = Rc::default();
+
+	let lua = Lua::new();
+	lua.sandbox(true)?;
+	lua.load_from_std_lib(StdLib::ALL)?;
+	lua.load(r#"function install_package(package: string, aur: boolean) mrow.install_package(package, aur) end"#)
+		.eval::<()>()?;
+
+	let mrow_export = lua.create_table()?;
+	mrow_export.set("hostname", hostname)?;
+	mrow_export.set("base_dir", base_dir.to_string_lossy().trim())?;
+
+	{
+		let aur_helper = aur_helper.clone();
+		mrow_export.set(
+			"set_aur_helper",
+			lua.create_function(move |_, (helper): (String)| {
+				*aur_helper.lock().unwrap() = Some(match helper.to_lowercase().as_str() {
+					"yay" => AurHelper::Yay,
+					"paru" => AurHelper::Paru,
+					v => panic!("Invalid AUR helper: {v}"),
+				});
+				Ok(())
+			})?,
+		)?;
+	}
+
+	// Install package
+	{
+		let base_dir = base_dir.clone();
+		let steps = steps.clone();
+		mrow_export.set(
+			"install_package",
+			lua.create_function(move |lua, (package, aur): (String, Option<bool>)| {
+				let owner = lua_get_caller_path(lua, &base_dir)?;
+				let relative_path_str = MrowFile::collapse_path(&base_dir, &owner)
+					.to_string_lossy()
+					.into_owned();
+				let kind = StepKind::InstallPackage {
+					package,
+					aur: aur.unwrap_or_default(),
+				};
+				steps
+					.lock()
+					.map_err(|e| mlua::Error::runtime(e.to_string()))?
+					.push(Step {
+						owner,
+						relative_path_str,
+						kind,
+					});
+				Ok(())
+			})?,
+		)?;
+	}
+
+	// Install packages
+	{
+		let base_dir = base_dir.clone();
+		let steps = steps.clone();
+		mrow_export.set(
+			"install_packages",
+			lua.create_function(move |lua, (packages, aur): (Vec<String>, Option<bool>)| {
+				let owner = lua_get_caller_path(lua, &base_dir)?;
+				let relative_path_str = MrowFile::collapse_path(&base_dir, &owner)
+					.to_string_lossy()
+					.into_owned();
+				let kind = StepKind::InstallPackages {
+					packages,
+					aur: aur.unwrap_or_default(),
+				};
+				steps
+					.lock()
+					.map_err(|e| mlua::Error::runtime(e.to_string()))?
+					.push(Step {
+						owner,
+						relative_path_str,
+						kind,
+					});
+				Ok(())
+			})?,
+		)?;
+	}
+
+	// Copy file
+	{
+		let base_dir = base_dir.clone();
+		let steps = steps.clone();
+		mrow_export.set(
+			"copy_file",
+			lua.create_function(move |lua, (from, to, as_root): (String, String, Option<bool>)| {
+				let owner = lua_get_caller_path(lua, &base_dir)?;
+				let Some(parent) = owner.parent() else { unreachable!() };
+				let relative_path_str = MrowFile::collapse_path(&base_dir, &owner)
+					.to_string_lossy()
+					.into_owned();
+				let kind = StepKind::CopyFile {
+					from: MrowFile::resolve_path(&from, &parent),
+					to: MrowFile::resolve_path(&to, &parent),
+					as_root: as_root.unwrap_or_default(),
+				};
+				steps
+					.lock()
+					.map_err(|e| mlua::Error::runtime(e.to_string()))?
+					.push(Step {
+						owner,
+						relative_path_str,
+						kind,
+					});
+				Ok(())
+			})?,
+		)?;
+	}
+
+	// Symlink
+	{
+		let base_dir = base_dir.clone();
+		let steps = steps.clone();
+		mrow_export.set(
+			"symlink",
+			lua.create_function(
+				move |lua, (from, to, delete_existing): (String, String, Option<bool>)| {
+					let owner = lua_get_caller_path(lua, &base_dir)?;
+					let Some(parent) = owner.parent() else { unreachable!() };
+					let relative_path_str = MrowFile::collapse_path(&base_dir, &owner)
+						.to_string_lossy()
+						.into_owned();
+					let kind = StepKind::Symlink {
+						from: MrowFile::resolve_path(&from, &parent),
+						to: MrowFile::resolve_path(&to, &parent),
+						delete_existing: delete_existing.unwrap_or_default(),
+					};
+					steps
+						.lock()
+						.map_err(|e| mlua::Error::runtime(e.to_string()))?
+						.push(Step {
+							owner,
+							relative_path_str,
+							kind,
+						});
+					Ok(())
+				},
+			)?,
+		)?;
+	}
+
+	// Run command
+	{
+		let base_dir = base_dir.clone();
+		let steps = steps.clone();
+		mrow_export.set(
+			"run_command",
+			lua.create_function(move |lua, (command): (String)| {
+				let owner = lua_get_caller_path(lua, &base_dir)?;
+				let relative_path_str = MrowFile::collapse_path(&base_dir, &owner)
+					.to_string_lossy()
+					.into_owned();
+				let kind = StepKind::RunCommand { command };
+				steps
+					.lock()
+					.map_err(|e| mlua::Error::runtime(e.to_string()))?
+					.push(Step {
+						owner,
+						relative_path_str,
+						kind,
+					});
+				Ok(())
+			})?,
+		)?;
+	}
+
+	// Run commands
+	{
+		let base_dir = base_dir.clone();
+		let steps = steps.clone();
+		mrow_export.set(
+			"run_commands",
+			lua.create_function(move |lua, (commands): (Vec<String>)| {
+				let owner = lua_get_caller_path(lua, &base_dir)?;
+				let relative_path_str = MrowFile::collapse_path(&base_dir, &owner)
+					.to_string_lossy()
+					.into_owned();
+				let kind = StepKind::RunCommands { commands };
+				steps
+					.lock()
+					.map_err(|e| mlua::Error::runtime(e.to_string()))?
+					.push(Step {
+						owner,
+						relative_path_str,
+						kind,
+					});
+				Ok(())
+			})?,
+		)?;
+	}
+
+	// Run script
+	{
+		let base_dir = base_dir.clone();
+		let steps = steps.clone();
+		mrow_export.set(
+			"run_script",
+			lua.create_function(move |lua, (path): (String)| {
+				let owner = lua_get_caller_path(lua, &base_dir)?;
+				let relative_path_str = MrowFile::collapse_path(&base_dir, &owner)
+					.to_string_lossy()
+					.into_owned();
+				let kind = StepKind::RunScript {
+					path: MrowFile::resolve_path(&path, &base_dir),
+				};
+				steps
+					.lock()
+					.map_err(|e| mlua::Error::runtime(e.to_string()))?
+					.push(Step {
+						owner,
+						relative_path_str,
+						kind,
+					});
+				Ok(())
+			})?,
+		)?;
+	}
+
+	lua.globals().set("mrow", mrow_export)?;
+	lua.globals().set("_require", lua.globals().raw_get::<_, mlua::Function>("require")?)?;
+	lua.globals().set("require", lua.create_function(move |lua, relative_path: String| {
+		let path = if relative_path.starts_with("@/") {
+			let relative_path = &relative_path[2..];
+			base_dir.join(relative_path)
+		} else {
+			lua_get_caller_path(lua, &base_dir)?
+				.parent()
+				.unwrap_or_else(|| {
+					unreachable!("the program doesn't allow for placing a mrow.luau file in the root of a filesystem")
+				})
+				.to_path_buf()
+				.join(relative_path)
+		};
+
+		Ok(lua
+			.load(format!(r#"_require("{}")"#, path.to_string_lossy()))
+			.eval::<mlua::Value>()?)
+	})?)?;
+
+	let create_log_fn = |level: log::Level| {
+		lua.create_function(move |_, message: String| {
+			log::log!(level, "{message}");
+			Ok(())
+		})
 	};
+	lua.globals().set("log_info", create_log_fn(log::Level::Info)?)?;
+	lua.globals().set("log_warn", create_log_fn(log::Level::Warn)?)?;
+	lua.globals().set("log_debug", create_log_fn(log::Level::Debug)?)?;
+	lua.globals().set("log_error", create_log_fn(log::Level::Error)?)?;
 
-	if !base_dir.exists() {
-		error!("Dir '{}' doesn't exist!", base_dir.to_string_lossy());
-		exit(-1);
-	}
+	let script = lua.load(std::fs::read_to_string(root_file)?);
+	script.eval::<()>()?;
 
-	let root_file = base_dir.join("mrow.toml");
-	if !root_file.exists() {
-		error!("No mrow.toml found in '{}'", base_dir.to_string_lossy());
-		exit(-1);
-	}
+	let steps = std::mem::replace(&mut *steps.lock().unwrap(), vec![]);
+	let aur_helper = std::mem::replace(&mut *aur_helper.lock().unwrap(), None);
+	Ok((steps, aur_helper))
+}
 
-	let root = MrowFile::new(&PathBuf::new(), &root_file)?;
+fn _main_toml(base_dir: PathBuf, root_file: &Path, hostname: &str) -> Result<(Vec<Step>, Option<AurHelper>)> {
+	let root = MrowFile::new(&base_dir, &root_file)?;
 	let aur_helper = root.config.as_ref().and_then(|c| c.aur_helper);
 
-	let hostname = std::fs::read_to_string("/etc/hostname")?;
 	let all_steps = get_all_steps(
 		&root.dir,
 		&root,
@@ -638,6 +916,36 @@ fn _main() -> Result<()> {
 			.and_then(|i| i.into_iter().find(|i| &i.hostname == &hostname.trim()))
 			.map(|i| i.includes),
 	)?;
+
+	Ok((all_steps, aur_helper))
+}
+
+fn _main() -> Result<()> {
+	colog::default_builder().filter_level(log::LevelFilter::Debug).init();
+
+	check_os_release()?;
+
+	let args = Args::parse();
+	let base_dir = match args.dir {
+		Some(ref dir) => PathBuf::from(dir).canonicalize()?,
+		None => std::env::current_dir()?,
+	};
+
+	if !base_dir.exists() {
+		error!("Dir '{}' doesn't exist!", base_dir.to_string_lossy());
+		exit(-1);
+	}
+
+	let mut lua = true;
+	let mut root_file = base_dir.join("mrow.luau");
+	if !root_file.exists() {
+		root_file = base_dir.join("mrow.toml");
+		lua = false;
+		if !root_file.exists() {
+			error!("No mrow.toml or mrow.luau found in '{}'", base_dir.to_string_lossy());
+			exit(-1);
+		}
+	}
 
 	let username = std::env::var("USER")?;
 
@@ -656,6 +964,14 @@ fn _main() -> Result<()> {
 		 tea!"
 	);
 
+	let hostname = std::fs::read_to_string("/etc/hostname")?;
+	let hostname = hostname.trim();
+	let (all_steps, aur_helper) = if lua {
+		_main_lua(base_dir, &root_file, hostname)?
+	} else {
+		_main_toml(base_dir, &root_file, hostname)?
+	};
+
 	if !args.debug {
 		let sudo_out = std::process::Command::new("sudo").args(["ls"]).output()?;
 		if !sudo_out.status.success() {
@@ -672,7 +988,7 @@ fn _main() -> Result<()> {
 			AurHelper::Paru => "paru-bin",
 		};
 
-		match run_command(args.debug, &root.path, &format!("pacman -Qi {name}")) {
+		match run_command(args.debug, &root_file, &format!("pacman -Qi {name}")) {
 			Ok(()) => {
 				info!("AUR helper {name} is already installed, skipping install");
 			}
@@ -682,7 +998,7 @@ fn _main() -> Result<()> {
 				info!("Installing prerequisite packages (base-devel group and git)");
 				install_packages(
 					args.debug,
-					&root.path,
+					&root_file,
 					&["base-devel".into(), "git".into()],
 					false,
 					None,
@@ -691,7 +1007,7 @@ fn _main() -> Result<()> {
 				info!("Cloning {name} repo into /opt/{name}");
 				run_commands(
 					args.debug,
-					&root.path,
+					&root_file,
 					&[
 						format!("sudo git clone https://aur.archlinux.org/{name}.git /opt/{name}"),
 						format!("sudo chown -R {username}: /opt/{name}"),
@@ -701,7 +1017,7 @@ fn _main() -> Result<()> {
 				info!("Building and installing {name}");
 				run_command_raw(
 					args.debug,
-					&root.path,
+					&root_file,
 					"makepkg",
 					&["-si", "--noconfirm"],
 					&format!("/opt/{name}"),
